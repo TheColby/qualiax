@@ -433,7 +433,10 @@ def compute_temporal(audio: NDArray, sr: int, ref_audio=None, ref_sr=None) -> li
         temporal_centroid = 0.0
 
     # Zero crossing rate statistics
-    zcr_frames = np.array([float(np.mean(np.abs(np.diff(np.sign(f))) > 0)) for f in frames])
+    zcr_frames = np.array([
+        float(np.mean(np.abs(np.diff(np.sign(mono[i:i + frame_len]))) > 0))
+        for i in range(0, len(mono) - frame_len, hop)
+    ])
 
     # Pause detection
     pauses = []
