@@ -13,6 +13,28 @@ import click
 from .analyzer import AudioAnalyzer
 from .reporter import ConsoleReporter, JsonReporter, CsvReporter
 
+# ANSI color codes
+_GREEN  = "\033[32m"
+_CYAN   = "\033[36m"
+_DIM    = "\033[2m"
+_RESET  = "\033[0m"
+_UP     = "\033[1A"
+_ERASE  = "\033[2K"
+
+
+def _progress_bar(completed: int, total: int, path: Path, color: bool) -> str:
+    width = 28
+    filled = int(width * completed / total) if total else width
+    if color:
+        bar = _GREEN + "█" * filled + _DIM + "░" * (width - filled) + _RESET
+        counter = f"{_CYAN}{completed}/{total}{_RESET}"
+        name = _DIM + path.name[:40] + _RESET
+    else:
+        bar = "█" * filled + "░" * (width - filled)
+        counter = f"{completed}/{total}"
+        name = path.name[:40]
+    return f"\r  [{bar}] {counter}  {name}"
+
 SUPPORTED_EXTENSIONS = {".wav", ".flac", ".mp3", ".ogg", ".aac", ".m4a", ".opus", ".aiff", ".aif"}
 
 
@@ -103,7 +125,14 @@ def main(
         workers=workers,
     )
 
-    results = analyzer.analyze_all(all_files)
+    use_color = not no_color and sys.stderr.isatty()
+
+    def _on_progress(completed, total, path):
+        if not silent:
+            line = _progress_bar(completed, total, path, color=use_color)
+            click.echo(line, nl=(completed == total), err=True)
+
+    results = analyzer.analyze_all(all_files, on_progress=_on_progress)
 
     # --- Report ---
     if output:

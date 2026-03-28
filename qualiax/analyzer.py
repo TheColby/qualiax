@@ -164,17 +164,30 @@ class AudioAnalyzer:
 
         return result
 
-    def analyze_all(self, paths: list[Path]) -> list[FileResult]:
-        if self.workers == 1 or len(paths) == 1:
-            return [self.analyze_file(p) for p in paths]
+    def analyze_all(self, paths: list[Path], on_progress=None) -> list[FileResult]:
+        """Analyze all paths. on_progress(completed, total, path) called after each file."""
+        total = len(paths)
 
-        results = [None] * len(paths)
+        if self.workers == 1 or total == 1:
+            results = []
+            for i, p in enumerate(paths):
+                r = self.analyze_file(p)
+                results.append(r)
+                if on_progress:
+                    on_progress(i + 1, total, p)
+            return results
+
+        results = [None] * total
         with ThreadPoolExecutor(max_workers=self.workers) as ex:
             futures = {ex.submit(self.analyze_file, p): i for i, p in enumerate(paths)}
+            completed = 0
             for fut in as_completed(futures):
                 idx = futures[fut]
                 try:
                     results[idx] = fut.result()
                 except Exception as e:
                     results[idx] = FileResult(path=str(paths[idx]), error=str(e))
+                completed += 1
+                if on_progress:
+                    on_progress(completed, total, paths[idx])
         return results
