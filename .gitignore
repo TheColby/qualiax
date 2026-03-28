@@ -8,3 +8,6 @@ build/
 .venv/
 venv/
 .env
+.claude/
+results.json
+*.auto.json
