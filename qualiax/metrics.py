@@ -1107,12 +1107,19 @@ def _cepstral_distance(y: NDArray, r: NDArray, sr: int, n_ceps=13) -> Optional[f
 # Registry
 # ─────────────────────────────────────────────────────────────────────────────
 
+from .metrics_prosody       import compute_prosody
+from .metrics_psychoacoustic import compute_psychoacoustic
+from .metrics_speaker       import compute_speaker
+
 METRIC_GROUPS: dict[str, callable] = {
-    "basic": compute_basic,
-    "loudness": compute_loudness,
-    "spectral": compute_spectral,
-    "temporal": compute_temporal,
-    "noise": compute_noise,
-    "speech": compute_speech,
-    "perceptual": compute_perceptual,
+    "basic":          compute_basic,
+    "loudness":       compute_loudness,
+    "spectral":       compute_spectral,
+    "temporal":       compute_temporal,
+    "noise":          compute_noise,
+    "speech":         compute_speech,
+    "perceptual":     compute_perceptual,
+    "prosody":        compute_prosody,
+    "psychoacoustic": compute_psychoacoustic,
+    "speaker":        compute_speaker,
 }

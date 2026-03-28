@@ -43,6 +43,9 @@ Results are automatically saved to `sample.json` alongside the source file.
   - [noise](#noise)
   - [speech](#speech)
   - [perceptual](#perceptual)
+  - [prosody](#prosody)
+  - [psychoacoustic](#psychoacoustic)
+  - [speaker](#speaker)
 - [Output](#output)
   - [Pretty (Console)](#pretty-console)
   - [JSON](#json)
@@ -56,7 +59,7 @@ Results are automatically saved to `sample.json` alongside the source file.
 
 ## Features
 
-- **60+ metrics** organized into 7 groups: basic signal properties, loudness (EBU R128 / BS.1770), spectral analysis, temporal structure, noise, speech characteristics, and perceptual quality
+- **90+ metrics** organized into 10 groups: basic signal properties, loudness (EBU R128 / BS.1770), spectral analysis, temporal structure, noise, speech characteristics, perceptual quality, prosody (F0 trajectory, jitter, shimmer, tremor), psychoacoustic (roughness, dissonance, sharpness, harmonicity), and speaker characteristics (formants, gender, age, voice quality)
 - **Zero config** — works out of the box on any WAV file; results automatically saved to `filename.json`
 - **Intrusive and non-intrusive modes** — run standalone or supply a reference file for difference-based metrics (PESQ, STOI, SI-SDR, SDR)
 - **Multiple output formats** — colored console, JSON, CSV
@@ -180,7 +183,7 @@ qualiax recording.wav --metrics basic,loudness,spectral
 qualiax recording.wav --metrics all      # default
 ```
 
-Available groups: `basic`, `loudness`, `spectral`, `temporal`, `noise`, `speech`, `perceptual`
+Available groups: `basic`, `loudness`, `spectral`, `temporal`, `noise`, `speech`, `perceptual`, `prosody`, `psychoacoustic`, `speaker`
 
 ### Parallel Processing
 
@@ -364,6 +367,111 @@ $$\text{CD} = \frac{1}{T}\sum_t \sqrt{\sum_{k=1}^{13}(c_k(t) - c_k^{(r)}(t))^2}$
 | STOI (Short-Time Objective Intelligibility) | 0–1 | Requires `--reference`. True STOI if `pystoi` installed |
 | SI-SDR | dB | Requires `--reference` |
 | Log-Spectral Distance | dB | Requires `--reference` |
+
+---
+
+### prosody
+
+Per-frame F0 trajectory, perturbation measures, and speech rate. All metrics computed via normalized autocorrelation — no external dependencies.
+
+**Normalized autocorrelation F0 detection:**
+
+$$r_{xx}[\tau] = \frac{\sum_n x[n]\,x[n+\tau]}{\sum_n x[n]^2}, \quad \hat{f}_0 = \frac{f_s}{\hat{\tau}},\quad \hat{\tau} = \arg\max_{\tau \in [\tau_{\min},\tau_{\max}]} r_{xx}[\tau]$$
+
+A frame is classified voiced when $r_{xx}[\hat{\tau}] > 0.40$.
+
+**Jitter** (local period perturbation):
+
+$$J = \frac{\frac{1}{N-1}\sum_{i=1}^{N-1}|T_i - T_{i-1}|}{\frac{1}{N}\sum_{i=1}^{N} T_i} \times 100\%$$
+
+**Shimmer** (local amplitude perturbation):
+
+$$S = \frac{\frac{1}{N-1}\sum_{i=1}^{N-1}|A_i - A_{i-1}|}{\frac{1}{N}\sum_{i=1}^{N} A_i} \times 100\%$$
+
+| Metric | Unit | Description |
+|--------|------|-------------|
+| Voiced Frame Ratio | % | Fraction of frames with $r_{xx}[\hat\tau] > 0.40$ |
+| F0 Mean | Hz | $\bar{f}_0 = \langle f_0(t) \rangle$ over voiced frames |
+| F0 Std | Hz | Standard deviation of voiced F0 |
+| F0 Min / Max | Hz | Extremes of voiced F0 |
+| F0 Range | Hz | $f_{0,\max} - f_{0,\min}$ |
+| Pitch Variability (CV) | % | $\sigma_{f_0} / \bar{f}_0 \times 100$ — higher = more expressive |
+| F0 Slope | Hz/s | Linear regression of $f_0(t)$ over voiced frames |
+| Jitter (Local) | % | Cycle-to-cycle F0 period perturbation. Normal: < 1% |
+| Shimmer (Local) | % | Cycle-to-cycle amplitude perturbation. Normal: < 3% |
+| Tremor Rate | Hz | Dominant spectral peak of F0 modulation in 2–15 Hz band |
+| Tremor Depth | Hz² | Power of dominant F0 modulation component |
+| Estimated Speech Rate | syll/s | Energy-envelope peak count / duration. Typical: 3–7 syll/s |
+
+---
+
+### psychoacoustic
+
+Perceptual features based on auditory models. Uses Bark-scale critical-band analysis.
+
+**Roughness** (Vassilakis 2001) — amplitude modulation between partial pairs:
+
+$$R = \sum_{i<j} \left(\frac{A_i A_j}{A_i^2+A_j^2}\right)^{3.11} \cdot (A_i A_j)^{0.1} \cdot x^2 e^{-(x/0.25)^2}, \quad x = \frac{|f_j - f_i|}{\text{CBW}(f_i)}$$
+
+**Sethares (1993) Sensory Dissonance:**
+
+$$D = \sum_{i<j} A_i A_j \left(e^{-b_1 s |f_j - f_i|} - e^{-b_2 s |f_j - f_i|}\right), \quad s = \frac{0.24}{0.0207 f_i + 18.96}$$
+
+**Sharpness** (Zwicker & Fastl 1990, Von Bismarck 1974):
+
+$$S = 0.11 \frac{\sum_z N'(z)\,g(z)\,z}{\sum_z N'(z)}, \quad g(z) = \begin{cases}1 & z \leq 15\\ 0.066\,e^{0.171z} & z > 15\end{cases}$$
+
+where $N'(z)$ is specific loudness in Bark band $z$.
+
+| Metric | Unit | Description |
+|--------|------|-------------|
+| Roughness | asper (rel.) | Vassilakis AM roughness model. High = grating/harsh |
+| Sensory Dissonance | (rel.) | Sethares beating/clashing model. Low = consonant spectrum |
+| Sharpness | acum | Zwicker high-frequency weighting. 1 acum = 1 kHz narrow-band noise |
+| Spectral Flatness (SFM) | 0–1 | Geometric/arithmetic power mean ratio. 0 = sine, 1 = white noise |
+| Tonality | 0–1 | $1 - \text{SFM}$. 1 = pure tone, 0 = noise-like |
+| F0 (cepstral estimate) | Hz | Mean-spectrum cepstrum peak — cross-check of per-frame F0 |
+| Harmonicity | 0–1 | Energy fraction at harmonic multiples of F0. 1 = purely harmonic |
+
+---
+
+### speaker
+
+Voice characteristics and speaker demographics estimated from acoustic features. All estimates are heuristic, not biometric classifiers.
+
+**LPC Formant Tracking** — order-12 LPC via Yule-Walker equations:
+
+$$\mathbf{R}\,\mathbf{a} = -\mathbf{r}_{1:p}, \quad \mathbf{R}_{ij} = r[|i-j|]$$
+
+Formant frequencies are angular frequencies of LPC polynomial roots with positive imaginary part and bandwidth < 600 Hz:
+
+$$F_k = \frac{\angle z_k \cdot f_s}{2\pi}, \quad \text{BW}_k = \frac{-\ln|z_k| \cdot f_s}{\pi}$$
+
+**Cepstral Peak Prominence** (Hillenbrand et al. 1994):
+
+$$\text{CPP} = \max_q c[q] - \hat{c}[q], \quad \text{where } \hat{c}[q] \text{ is the linear regression baseline}$$
+
+**Gender estimation** (Traunmüller & Eriksson 1995 empirical distributions):
+
+| F0 Mean | Estimate |
+|---------|----------|
+| < 145 Hz | male (adult) |
+| 145–180 Hz | ambiguous overlap zone |
+| 180–260 Hz | female (adult) |
+| > 260 Hz | child / high soprano |
+
+**Age estimation** — heuristic scoring from jitter, shimmer, HNR, spectral tilt, and pitch variability (Linville 2001; Xue & Deliyski 2001). Accuracy ± ~15 years.
+
+| Metric | Unit | Description |
+|--------|------|-------------|
+| F1–F4 Formant Frequency | Hz | Median formant over voiced frames (LPC order 12) |
+| Spectral Tilt | dB/oct | Power spectrum slope 100 Hz–Nyquist. Typical speech: −6 to −12 dB/oct |
+| Cepstral Peak Prominence (CPP) | dB | Hillenbrand (1994). > 5 dB = modal voice. < 3 dB = breathy |
+| Breathiness Index | 0–1 | CPP-derived. 0 = modal/clear, 1 = highly breathy |
+| Creakiness (Vocal Fry) Ratio | % | Frames with autocorrelation peak in 20–80 Hz (vocal fry register) |
+| Estimated Gender | — | Heuristic from F0 mean. 145–180 Hz = ambiguous overlap zone |
+| Gender Confidence | 0–1 | Distance from overlap zone as proxy for certainty |
+| Estimated Age Range | — | Heuristic from jitter, shimmer, HNR, tilt, pitch variability (± ~15 years) |
 
 ---
 

@@ -164,7 +164,10 @@ def main(
 
 
 def _parse_metric_groups(metrics: Optional[str]) -> set[str]:
-    valid = {"basic", "loudness", "spectral", "temporal", "noise", "speech", "perceptual", "all"}
+    valid = {
+        "basic", "loudness", "spectral", "temporal", "noise", "speech",
+        "perceptual", "prosody", "psychoacoustic", "speaker", "all",
+    }
     if not metrics:
         return {"all"}
     groups = {g.strip().lower() for g in metrics.split(",")}

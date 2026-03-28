@@ -9,21 +9,34 @@ Initial release. Core CLI with 60+ metrics across 7 groups.
 - Multi-backend audio loading (WAV, FLAC, MP3, AAC, M4A, OGG, Opus, AIFF)
 - Reference file support for intrusive metrics (PESQ, STOI, SI-SDR, SDR)
 - Parallel batch analysis
+- Auto-save `filename.json` alongside each analyzed file
 
 ---
 
-## v0.2.0 — Speech Quality Metrics
-Wire up the existing `metrics_speech_quality.py` and `speech_detector.py` modules that were written but left disconnected in v0.1.0.
+## v0.2.0 — Prosody, Psychoacoustics & Speaker Analysis — Released 2026-03-28
+Three new metric groups: 31 additional metrics.
 
-- **Jitter metrics** — local jitter, RAP, PPQ5, DDP (pitch period perturbation)
-- **Shimmer metrics** — local shimmer, APQ3, APQ5, DDA (amplitude perturbation)
+- **prosody** group — per-frame F0 trajectory (autocorrelation), jitter, shimmer, tremor rate/depth, pitch variability CV, F0 slope, estimated speech rate
+- **psychoacoustic** group — Vassilakis (2001) roughness, Sethares (1993) sensory dissonance, Zwicker spectral sharpness (acum), tonality, SFM, harmonicity
+- **speaker** group — LPC formant tracking (F1–F4, order 12), spectral tilt, Cepstral Peak Prominence (CPP), breathiness index, creakiness/vocal fry ratio, heuristic gender estimation, heuristic age range
+- Auto-save JSON behavior: `filename.wav` → `filename.json`
+- GitHub URLs and version aligned to `0.1.0`
+- LaTeX math formulas in README for all metric groups
+
+---
+
+## v0.3.0 — Speech Quality Metrics
+Wire up the existing `metrics_speech_quality.py` and `speech_detector.py` modules.
+
+- **Additional jitter measures** — RAP, PPQ5, DDP
+- **Additional shimmer measures** — APQ3, APQ5, DDA
 - **Noise-to-Harmonics Ratio (NHR)** — complement to HNR
 - **Speech detection gate** — automatically skip voice quality metrics on non-speech content (music, silence, noise)
 - **Content-type classification** — tag each file as `speech`, `music`, `noise`, or `silence` in output
 
 ---
 
-## v0.3.0 — Perceptual Quality Overhaul
+## v0.4.0 — Perceptual Quality Overhaul
 Replace heuristic MOS proxies with model-based estimators.
 
 - **DNSMOS integration** — Microsoft DNSMOS P.835 for non-intrusive speech quality (SIG, BAK, OVRL scores)
@@ -33,7 +46,7 @@ Replace heuristic MOS proxies with model-based estimators.
 
 ---
 
-## v0.4.0 — Richer Output & Reporting
+## v0.5.0 — Richer Output & Reporting
 Make results more useful for review and integration.
 
 - **HTML report** — self-contained single-file report with waveform thumbnails, metric tables, and per-group pass/fail badges
@@ -43,7 +56,7 @@ Make results more useful for review and integration.
 
 ---
 
-## v0.5.0 — Streaming & Real-Time Analysis
+## v0.6.0 — Streaming & Real-Time Analysis
 Extend qualiax beyond static files.
 
 - **stdin pipe support** — `ffmpeg -i stream.mp4 -f wav - | qualiax -`
@@ -53,7 +66,7 @@ Extend qualiax beyond static files.
 
 ---
 
-## v0.6.0 — Python API
+## v0.7.0 — Python API
 Make qualiax usable as a library, not just a CLI.
 
 - **Public Python API** — `from qualiax import analyze; result = analyze("file.wav")`
@@ -63,7 +76,7 @@ Make qualiax usable as a library, not just a CLI.
 
 ---
 
-## v0.7.0 — ML-Based Metrics & Extended Format Support
+## v0.8.0 — ML-Based Metrics & Extended Format Support
 Bring in learned quality models and wider codec coverage.
 
 - **CREPE F0 estimation** — replace autocorrelation-based pitch with the CREPE neural model for significantly better accuracy on noisy speech
