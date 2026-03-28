@@ -53,6 +53,7 @@ Results are automatically saved to `sample.json` alongside the source file.
 - [Hardware Acceleration](#hardware-acceleration)
 - [Supported Formats](#supported-formats)
 - [Requirements](#requirements)
+- [References](#references)
 - [License](#license)
 
 ---
@@ -218,6 +219,8 @@ Core signal properties derived directly from the waveform.
 
 $$x_{\text{rms}} = \sqrt{\frac{1}{N}\sum_{n=0}^{N-1} x[n]^2}$$
 
+where $x[n]$ is the discrete audio sample at index $n$, and $N$ is the total number of samples in the signal.
+
 | Metric | Unit | Formula / Description |
 |--------|------|-----------------------|
 | Duration | s | $T = N / f_s$ |
@@ -243,7 +246,9 @@ The K-weighting filter $H_K(s)$ is a two-stage shelving filter applied before lo
 
 $$L_K = -0.691 + 10\log_{10}\!\left(\frac{1}{T}\int_0^T \left|x_K(t)\right|^2 dt\right) \quad \text{LUFS}$$
 
-Gating is applied per BS.1770-4: absolute gate at $-70$ LUFS, relative gate at $\bar{L} - 10$ LU.
+where $x_K(t)$ is the audio signal after passing through the K-weighting filter $H_K(s)$, and $T$ is the total duration in seconds. The $-0.691$ offset aligns the scale to LUFS (Loudness Units relative to Full Scale).
+
+Gating is applied per BS.1770-4: absolute gate at $-70$ LUFS, relative gate at $\bar{L} - 10$ LU, where $\bar{L}$ is the ungated integrated loudness.
 
 | Metric | Unit | Description |
 |--------|------|-------------|
@@ -256,7 +261,7 @@ Gating is applied per BS.1770-4: absolute gate at $-70$ LUFS, relative gate at $
 
 ### spectral
 
-Frequency-domain characteristics computed via STFT. Let $X_t[k]$ denote the magnitude spectrum at frame $t$, $f_k$ the corresponding frequency, and $P_t[k] = |X_t[k]|^2$ the power.
+Frequency-domain characteristics computed via STFT. Let $X_t[k]$ denote the magnitude spectrum at frame $t$, $f_k$ the center frequency of bin $k$ in Hz, $P_t[k] = |X_t[k]|^2$ the power at bin $k$ and frame $t$, $K$ the total number of frequency bins, and $\langle \cdot \rangle_t$ the mean over all STFT frames.
 
 | Metric | Unit | Formula |
 |--------|------|---------|
@@ -284,7 +289,7 @@ Time-domain structure including speech activity and pause patterns. Frame energy
 
 $$E_m = \frac{1}{L}\sum_{n=0}^{L-1} x[mH + n]^2$$
 
-where $L$ is frame length (25 ms) and $H$ is hop size (10 ms).
+where $m$ is the frame index, $L$ is the frame length (25 ms = 400 samples at 16 kHz), $H$ is the hop size (10 ms = 160 samples at 16 kHz), and $M$ is the total number of frames. The per-frame energy in dB is $E_m^{dB} = 10\log_{10}(E_m)$. The VAD threshold is $\theta = \max(\text{P}_{30}(E^{dB}),\,-50\,\text{dBFS})$, where $\text{P}_{30}$ is the 30th percentile of all frame energies.
 
 | Metric | Unit | Description |
 |--------|------|-------------|
@@ -306,7 +311,7 @@ Noise floor and signal quality estimates.
 
 $$\text{SNR} = 10\log_{10}\!\left(\frac{P_{\text{signal}}}{P_{\text{noise}}}\right) \quad \text{dB}$$
 
-Noise floor is estimated as the mean energy of the quietest 10% of frames.
+where $P_{\text{signal}}$ is the mean frame energy of the most active 50% of frames, and $P_{\text{noise}}$ is the mean frame energy of the quietest 10% of frames (the noise floor estimate $\hat{N}$).
 
 | Metric | Unit | Formula / Description |
 |--------|------|-----------------------|
@@ -326,6 +331,8 @@ Speech-specific features computed on mono signal.
 MFCCs are computed from the log Mel filterbank $\mathbf{m}$ via DCT:
 
 $$c_k = \sqrt{\frac{2}{M}}\sum_{j=1}^{M} m_j \cos\!\left(\frac{\pi k (j - 0.5)}{M}\right), \quad k = 1, \ldots, 13$$
+
+where $m_j = \log(\mathbf{f}_j^\top \mathbf{p} + \varepsilon)$ is the log energy in Mel filter $j$, $\mathbf{f}_j$ is the $j$-th triangular Mel filter (spanning 80 Hz–8 kHz), $\mathbf{p}$ is the power spectrum of the frame, $M = 40$ is the number of Mel filters, $\varepsilon$ is a small constant for numerical stability, and $\sqrt{2/M}$ is the orthonormal DCT-II normalization factor.
 
 | Metric | Unit | Description |
 |--------|------|-------------|
@@ -347,17 +354,25 @@ Perceptual quality scores. Non-intrusive proxies are used by default; supply `--
 
 $$\text{SI-SDR} = 10\log_{10}\!\left(\frac{\|\alpha\mathbf{r}\|^2}{\|\hat{\mathbf{x}} - \alpha\mathbf{r}\|^2}\right), \quad \alpha = \frac{\hat{\mathbf{x}}^\top\mathbf{r}}{\|\mathbf{r}\|^2}$$
 
+where $\hat{\mathbf{x}}$ is the zero-mean test (degraded) signal vector, $\mathbf{r}$ is the zero-mean reference signal vector, $\alpha\mathbf{r}$ is the optimal target projection of $\hat{\mathbf{x}}$ onto $\mathbf{r}$, and $\hat{\mathbf{x}} - \alpha\mathbf{r}$ is the residual distortion component.
+
 **SDR**:
 
 $$\text{SDR} = 10\log_{10}\!\left(\frac{\|\mathbf{r}\|^2}{\|\mathbf{r} - \hat{\mathbf{x}}\|^2}\right)$$
+
+where $\mathbf{r}$ is the reference signal vector and $\hat{\mathbf{x}}$ is the estimated/test signal vector, so $\mathbf{r} - \hat{\mathbf{x}}$ is the distortion residual.
 
 **Log-Spectral Distance**:
 
 $$\text{LSD} = \frac{1}{KT}\sum_{t,k} \left|\log|X_t[k]|^2 - \log|R_t[k]|^2\right|$$
 
+where $X_t[k]$ is the STFT magnitude of the test signal at frame $t$ and bin $k$, $R_t[k]$ is the STFT magnitude of the reference signal, $K$ is the number of frequency bins, and $T$ is the number of frames.
+
 **Cepstral Distance**:
 
 $$\text{CD} = \frac{1}{T}\sum_t \sqrt{\sum_{k=1}^{13}(c_k(t) - c_k^{(r)}(t))^2}$$
+
+where $c_k(t)$ is the $k$-th MFCC of the test signal at frame $t$, $c_k^{(r)}(t)$ is the $k$-th MFCC of the reference signal at frame $t$, and $T$ is the number of frames. The inner sum is the Euclidean distance in 13-dimensional cepstral space.
 
 | Metric | Unit | Notes |
 |--------|------|-------|
@@ -378,15 +393,19 @@ Per-frame F0 trajectory, perturbation measures, and speech rate. All metrics com
 
 $$r_{xx}[\tau] = \frac{\sum_n x[n]\,x[n+\tau]}{\sum_n x[n]^2}, \quad \hat{f}_0 = \frac{f_s}{\hat{\tau}},\quad \hat{\tau} = \arg\max_{\tau \in [\tau_{\min},\tau_{\max}]} r_{xx}[\tau]$$
 
-A frame is classified voiced when $r_{xx}[\hat{\tau}] > 0.40$.
+where $\tau$ is the lag in samples, $\hat{\tau}$ is the estimated fundamental period in samples, $\tau_{\min} = \lfloor f_s / f_{0,\max} \rfloor$ and $\tau_{\max} = \lfloor f_s / f_{0,\min} \rfloor$ with $f_{0,\min} = 60$ Hz and $f_{0,\max} = 500$ Hz. A frame is classified voiced when $r_{xx}[\hat{\tau}] > 0.40$.
 
 **Jitter** (local period perturbation):
 
 $$J = \frac{\frac{1}{N-1}\sum_{i=1}^{N-1}|T_i - T_{i-1}|}{\frac{1}{N}\sum_{i=1}^{N} T_i} \times 100\%$$
 
+where $T_i = 1 / f_{0,i}$ is the fundamental period (in seconds) of the $i$-th consecutive voiced frame, and $N$ is the number of voiced frames in the sequence.
+
 **Shimmer** (local amplitude perturbation):
 
 $$S = \frac{\frac{1}{N-1}\sum_{i=1}^{N-1}|A_i - A_{i-1}|}{\frac{1}{N}\sum_{i=1}^{N} A_i} \times 100\%$$
+
+where $A_i$ is the RMS amplitude of voiced frame $i$, and $N$ is the number of consecutive voiced frames.
 
 | Metric | Unit | Description |
 |--------|------|-------------|
@@ -413,15 +432,19 @@ Perceptual features based on auditory models. Uses Bark-scale critical-band anal
 
 $$R = \sum_{i<j} \left(\frac{A_i A_j}{A_i^2+A_j^2}\right)^{3.11} \cdot (A_i A_j)^{0.1} \cdot x^2 e^{-(x/0.25)^2}, \quad x = \frac{|f_j - f_i|}{\text{CBW}(f_i)}$$
 
+where $A_i, A_j$ are the normalized amplitudes of the $i$-th and $j$-th spectral partials, $f_i < f_j$ are their frequencies in Hz, $\text{CBW}(f_i) = 25 + 75(1 + 1.4(f_i/1000)^2)^{0.69}$ is the critical bandwidth at $f_i$ (Zwicker 1961), and $x$ is the frequency difference normalized by the critical bandwidth. The roughness curve $x^2 e^{-(x/0.25)^2}$ peaks at $x = 0.25$ (Plomp & Levelt 1965).
+
 **Sethares (1993) Sensory Dissonance:**
 
 $$D = \sum_{i<j} A_i A_j \left(e^{-b_1 s |f_j - f_i|} - e^{-b_2 s |f_j - f_i|}\right), \quad s = \frac{0.24}{0.0207 f_i + 18.96}$$
+
+where $b_1 = 3.5$ and $b_2 = 5.75$ are empirical constants fitted to the Plomp & Levelt (1965) consonance data, $f_i$ is the frequency of the lower partial in Hz, and $s$ is a frequency-dependent scaling factor that maps the physical frequency difference onto a perceptual dissonance curve.
 
 **Sharpness** (Zwicker & Fastl 1990, Von Bismarck 1974):
 
 $$S = 0.11 \frac{\sum_z N'(z)\,g(z)\,z}{\sum_z N'(z)}, \quad g(z) = \begin{cases}1 & z \leq 15\\ 0.066\,e^{0.171z} & z > 15\end{cases}$$
 
-where $N'(z)$ is specific loudness in Bark band $z$.
+where $z$ is the Bark band index (0–24 Bark), $N'(z)$ is the specific loudness in Bark band $z$ (proportional to the square root of mean power in the band), and $g(z)$ is Von Bismarck's (1974) weighting function that increases the contribution of high-frequency bands above 15 Bark.
 
 | Metric | Unit | Description |
 |--------|------|-------------|
@@ -443,13 +466,19 @@ Voice characteristics and speaker demographics estimated from acoustic features.
 
 $$\mathbf{R}\,\mathbf{a} = -\mathbf{r}_{1:p}, \quad \mathbf{R}_{ij} = r[|i-j|]$$
 
+where $\mathbf{R}$ is the $p \times p$ symmetric Toeplitz autocorrelation matrix with $\mathbf{R}_{ij} = r[|i-j|]$, $\mathbf{a} = [a_1, \ldots, a_p]^\top$ is the LPC coefficient vector, $\mathbf{r}_{1:p} = [r[1], \ldots, r[p]]^\top$ is the autocorrelation vector at lags 1 to $p$, $r[k] = \frac{1}{N}\sum_n x[n]\,x[n+k]$ is the biased autocorrelation at lag $k$, and $p = 12$ is the predictor order.
+
 Formant frequencies are angular frequencies of LPC polynomial roots with positive imaginary part and bandwidth < 600 Hz:
 
 $$F_k = \frac{\angle z_k \cdot f_s}{2\pi}, \quad \text{BW}_k = \frac{-\ln|z_k| \cdot f_s}{\pi}$$
 
+where $z_k$ is the $k$-th complex root of the LPC polynomial $A(z) = 1 + a_1 z^{-1} + \cdots + a_p z^{-p}$, $\angle z_k$ is the argument of $z_k$ in radians, $|z_k|$ is its modulus, and $\text{BW}_k$ is the formant bandwidth. Only roots with $50 < F_k < 5500$ Hz and $\text{BW}_k < 600$ Hz are retained.
+
 **Cepstral Peak Prominence** (Hillenbrand et al. 1994):
 
-$$\text{CPP} = \max_q c[q] - \hat{c}[q], \quad \text{where } \hat{c}[q] \text{ is the linear regression baseline}$$
+$$\text{CPP} = \max_q \bigl[c[q] - \hat{c}[q]\bigr]$$
+
+where $c[q]$ is the real cepstrum at quefrency $q$ (samples), computed as $c = |\mathcal{F}^{-1}\{\log |X|^2\}|$, $\hat{c}[q]$ is a linear regression baseline fit to $c[q]$ over the quefrency range $[f_s/500,\, f_s/50]$ (corresponding to F0 range 50–500 Hz), and the peak is taken within that quefrency range.
 
 **Gender estimation** (Traunmüller & Eriksson 1995 empirical distributions):
 
@@ -586,6 +615,89 @@ Optional:
 - `pystoi >= 0.3` — True STOI scores
 - `librosa >= 0.10` — Universal audio loader fallback
 - `torch` — GPU acceleration (CUDA or Apple MPS)
+
+---
+
+## References
+
+### Standards & Specifications
+
+- ITU-R BS.1770-4 (2015). *Algorithms to measure audio programme loudness and true-peak audio level.* International Telecommunication Union.
+- EBU R128 (2020). *Loudness normalisation and permitted maximum level of audio signals.* European Broadcasting Union.
+- ITU-T P.862 (2001). *Perceptual evaluation of speech quality (PESQ): An objective method for end-to-end speech quality assessment of narrow-band telephone networks and speech codecs.* International Telecommunication Union.
+- ITU-T P.563 (2004). *Single-ended method for objective speech quality assessment in narrow-band telephony applications.* International Telecommunication Union.
+- ITU-T P.56 (2011). *Objective measurement of active speech level.* International Telecommunication Union.
+
+### Loudness & Level
+
+- Williams, M. (1999). *Loudness normalisation: The EBU approach.* Proceedings of the AES 106th Convention.
+- Lund, T. (2006). *Control of loudness in digital TV and radio.* EBU Technical Review, 2006(4).
+
+### Perceptual Quality
+
+- Rix, A. W., Beerends, J. G., Hollier, M. P., & Hekstra, A. P. (2001). Perceptual evaluation of speech quality (PESQ) — a new method for speech quality assessment of telephone networks and codecs. *ICASSP 2001*, 749–752.
+- Taal, C. H., Hendriks, R. C., Heusdens, R., & Jensen, J. (2011). An algorithm for intelligibility prediction of time–frequency weighted noisy speech. *IEEE Transactions on Audio, Speech, and Language Processing*, 19(7), 2125–2136.
+- Le Roux, J., Wisdom, S., Erdogan, H., & Hershey, J. R. (2019). SDR — half-baked or well done? *ICASSP 2019*, 626–630.
+- Hu, G., & Loizou, P. C. (2008). Evaluation of objective quality measures for speech enhancement. *IEEE Transactions on Audio, Speech, and Language Processing*, 16(1), 229–238.
+
+### Spectral Analysis
+
+- Grey, J. M., & Gordon, J. W. (1978). Perceptual effects of spectral modifications on musical timbres. *Journal of the Acoustical Society of America*, 63(5), 1493–1500.
+- Peeters, G. (2004). *A large set of audio features for sound description (similarity and classification) in the CUIDADO project.* IRCAM Technical Report.
+
+### Psychoacoustics
+
+- Plomp, R., & Levelt, W. J. M. (1965). Tonal consonance and critical bandwidth. *Journal of the Acoustical Society of America*, 38(4), 548–560.
+- Sethares, W. A. (1993). Local consonance and the relationship between timbre and scale. *Journal of the Acoustical Society of America*, 94(3), 1218–1228.
+- Vassilakis, P. N. (2001). *Perceptual and physical properties of amplitude fluctuation and their musical significance.* PhD dissertation, UCLA.
+- Vassilakis, P. N. (2005). Auditory roughness as a means of musical expression. *Selected Reports in Ethnomusicology*, 12, 119–144.
+- Zwicker, E., & Fastl, H. (1990). *Psychoacoustics: Facts and models.* Springer-Verlag.
+- Von Bismarck, G. (1974). Sharpness as an attribute of the timbre of steady sounds. *Acustica*, 30(3), 159–172.
+- Zwicker, E. (1961). Subdivision of the audible frequency range into critical bands (Frequenzgruppen). *Journal of the Acoustical Society of America*, 33(2), 248.
+- Traunmüller, H. (1990). Analytical expressions for the tonotopic sensory scale. *Journal of the Acoustical Society of America*, 88(1), 97–100.
+
+### Prosody & F0 Analysis
+
+- Boersma, P. (1993). Accurate short-term analysis of the fundamental frequency and the harmonics-to-noise ratio of a sampled sound. *Proceedings of the Institute of Phonetic Sciences*, 17, 97–110.
+- De Cheveigné, A., & Kawahara, H. (2002). YIN, a fundamental frequency estimator for speech and music. *Journal of the Acoustical Society of America*, 111(4), 1917–1930.
+- Mermelstein, P. (1975). Automatic segmentation of speech into syllabic units. *Journal of the Acoustical Society of America*, 58(4), 880–883.
+- Baken, R. J., & Orlikoff, R. F. (2000). *Clinical measurement of speech and voice* (2nd ed.). Singular Publishing.
+
+### Voice Quality & Speaker Characteristics
+
+- Hillenbrand, J., Cleveland, R. A., & Erickson, R. L. (1994). Acoustic correlates of breathy vocal quality. *Journal of Speech and Hearing Research*, 37(4), 769–778.
+- Kreiman, J., & Sidtis, D. (2011). *Foundations of voice studies: An interdisciplinary approach to voice production and perception.* Wiley-Blackwell.
+- Linville, S. E. (2001). *Vocal aging.* Singular Publishing Group.
+- Xue, S. A., & Deliyski, D. D. (2001). Effects of aging on selected acoustic voice parameters: Preliminary normative data and educational implications. *Educational Gerontology*, 27(2), 159–168.
+- Traunmüller, H., & Eriksson, A. (1995). *The frequency range of the voice fundamental in the speech of male and female adults.* Manuscript, Stockholm University.
+- Hammarberg, B., Fritzell, B., Gauffin, J., Sundberg, J., & Wedin, L. (1980). Perceptual and acoustic correlates of abnormal voice qualities. *Acta Oto-Laryngologica*, 90(1–6), 441–451.
+
+### LPC & Formant Tracking
+
+- Markel, J. D., & Gray, A. H. (1976). *Linear prediction of speech.* Springer-Verlag.
+- Proakis, J. G., & Manolakis, D. G. (2006). *Digital signal processing: Principles, algorithms, and applications* (4th ed.). Prentice Hall.
+- Levinson, N. (1947). The Wiener (root mean square) error criterion in filter design and prediction. *Journal of Mathematics and Physics*, 25(1–4), 261–278.
+- Durbin, J. (1960). The fitting of time-series models. *Revue de l'Institut International de Statistique*, 28(3), 233–244.
+
+### Cepstral Analysis
+
+- Noll, A. M. (1967). Cepstrum pitch determination. *Journal of the Acoustical Society of America*, 41(2), 293–309.
+- Bogert, B. P., Healy, M. J. R., & Tukey, J. W. (1963). The quefrency alanysis of time series for echoes: Cepstrum, pseudo-autocovariance, cross-cepstrum and saphe cracking. *Proceedings of the Symposium on Time Series Analysis*, 209–243.
+
+### MFCCs & Speech Features
+
+- Davis, S., & Mermelstein, P. (1980). Comparison of parametric representations for monosyllabic word recognition in continuously spoken sentences. *IEEE Transactions on Acoustics, Speech, and Signal Processing*, 28(4), 357–366.
+- Logan, B. (2000). Mel frequency cepstral coefficients for music modeling. *ISMIR 2000*.
+
+### Noise & SNR
+
+- Boll, S. F. (1979). Suppression of acoustic noise in speech using spectral subtraction. *IEEE Transactions on Acoustics, Speech, and Signal Processing*, 27(2), 113–120.
+- Loizou, P. C. (2007). *Speech enhancement: Theory and practice.* CRC Press.
+
+### Software & Toolkits
+
+- McFee, B., et al. (2015). librosa: Audio and music signal analysis in Python. *Proceedings of the 14th Python in Science Conference*, 18–25.
+- Boersma, P., & Weenink, D. (2024). *Praat: Doing phonetics by computer* (version 6.4). Retrieved from https://www.praat.org/
 
 ---
 

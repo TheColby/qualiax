@@ -32,6 +32,19 @@ fi
 echo ""
 echo "[2/4] Installing qualiax + all Python dependencies..."
 pip install --upgrade pip setuptools wheel
+
+# Explicit installs so every dep is visible in the output, even if already present
+pip install \
+    "click>=8.0" \
+    "numpy>=1.23" \
+    "scipy>=1.9" \
+    "soundfile>=0.12" \
+    "pydub>=0.25" \
+    "pesq>=0.0.4" \
+    "pystoi>=0.3" \
+    "librosa>=0.10"
+
+# Install qualiax itself in editable mode (picks up any remaining transitive deps)
 pip install -e "$SCRIPT_DIR/[all]"
 
 # ── PyTorch (GPU acceleration) ────────────────────────────────────────────────
