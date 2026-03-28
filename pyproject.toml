@@ -58,8 +58,8 @@ all = [
 qualiax = "qualiax.cli:main"
 
 [project.urls]
-Repository = "https://github.com/your-username/qualiax"
-Issues = "https://github.com/your-username/qualiax/issues"
+Repository = "https://github.com/TheColby/qualiax"
+Issues = "https://github.com/TheColby/qualiax/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]

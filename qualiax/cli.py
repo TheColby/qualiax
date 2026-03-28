@@ -135,6 +135,15 @@ def main(
     results = analyzer.analyze_all(all_files, on_progress=_on_progress)
 
     # --- Report ---
+    # Default: save JSON alongside each source file (filename.wav → filename.json)
+    if not output:
+        for r, p in zip(results, all_files):
+            auto_path = p.with_suffix(".json")
+            text = JsonReporter().render([r])
+            auto_path.write_text(text, encoding="utf-8")
+        if not silent:
+            click.echo(f"JSON saved alongside source file(s)", err=True)
+
     if output:
         out_path = Path(output)
         out_fmt = _detect_format(out_path, fmt)
