@@ -219,17 +219,17 @@ Options:
 
 Core signal properties derived directly from the waveform. Let $x[n]$ denote the discrete audio sample at index $n$, and $N$ the total number of samples.
 
-$$x_\text{rms} = \sqrt{\frac{1}{N}\sum_{n=0}^{N-1} x[n]^2}$$
+$$x_{\text{rms}} = \sqrt{\frac{1}{N}\sum_{n=0}^{N-1} x[n]^2}$$
 
-$$L_P = 20\log_{10}\!\left(\max_n \lvert x[n] \rvert\right) \qquad \text{Peak Level (dBFS)}$$
+$$L_P = 20\log_{10}\left(\max_n \lvert x[n] \rvert\right) \qquad \text{Peak Level (dBFS)}$$
 
-$$L_\text{rms} = 20\log_{10}(x_\text{rms}) \qquad \text{RMS Level (dBFS)}$$
+$$L_{\text{rms}} = 20\log_{10}(x_{\text{rms}}) \qquad \text{RMS Level (dBFS)}$$
 
-$$C = 20\log_{10}\!\left(\frac{\max_n \lvert x[n] \rvert}{x_\text{rms}}\right) \qquad \text{Crest Factor (dB)}$$
+$$C = 20\log_{10}\left(\frac{\max_n \lvert x[n] \rvert}{x_{\text{rms}}}\right) \qquad \text{Crest Factor (dB)}$$
 
 $$\mu = \frac{1}{N}\sum_{n=0}^{N-1} x[n] \qquad \text{DC Offset}$$
 
-$$\text{ZCR} = \frac{1}{N-1}\sum_{n=1}^{N-1}\mathbf{1}\bigl[\operatorname{sgn}(x[n]) \neq \operatorname{sgn}(x[n-1])\bigr] \qquad \text{(crossings/sample)}$$
+$$\text{ZCR} = \frac{1}{N-1}\sum_{n=1}^{N-1}\mathbf{1}\left[\operatorname{sgn}(x[n]) \neq \operatorname{sgn}(x[n-1])\right] \qquad \text{(crossings/sample)}$$
 
 | Metric | Unit | Description |
 |--------|------|-------------|
@@ -238,11 +238,11 @@ $$\text{ZCR} = \frac{1}{N-1}\sum_{n=1}^{N-1}\mathbf{1}\bigl[\operatorname{sgn}(x
 | Channels | — | Mono / stereo channel count |
 | Peak Amplitude | — | $\max_n \lvert x[n] \rvert$ |
 | Peak Level | dBFS | $L_P$ — 0 dBFS is full scale |
-| RMS Level | dBFS | $L_\text{rms}$ |
+| RMS Level | dBFS | $L_{\text{rms}}$ |
 | Crest Factor | dB | $C$ — high = dynamic or sparse signal |
 | DC Offset | — | $\mu$ — non-zero indicates a DC bias |
 | Silence Ratio | % | Fraction of samples with $\lvert x[n] \rvert < 10^{-3}$ |
-| Dynamic Range (simple) | dB | $L_P - L_\text{rms}$ |
+| Dynamic Range (simple) | dB | $L_P - L_{\text{rms}}$ |
 | Clipping Detected | 0/1 | 1 if any sample has $\lvert x[n] \rvert \geq 0.999$ |
 | Zero Crossing Rate | crossings/sample | ZCR — higher = noisier or fricative-heavy |
 
@@ -256,7 +256,7 @@ $$L_K = -0.691 + 10\log_{10}\!\left(\frac{1}{T}\int_0^T \lvert x_K(t) \rvert^2 \
 
 where $x_K(t)$ is the signal after K-weighting, $T$ is duration in seconds, and $-0.691$ aligns the scale to LUFS. Gating per BS.1770-4: absolute gate at $-70$ LUFS; relative gate at $\bar{L} - 10$ LU, where $\bar{L}$ is the ungated integrated loudness.
 
-$$L_\text{TP} = 20\log_{10}\!\left(\max_n \lvert x_{\uparrow 4}[n] \rvert\right) \qquad \text{dBTP}$$
+$$L_{\text{TP}} = 20\log_{10}\left(\max_n \lvert x_{\uparrow 4}[n] \rvert\right) \qquad \text{dBTP}$$
 
 where $x_{\uparrow 4}$ is the signal upsampled 4× to capture inter-sample peaks.
 
@@ -265,7 +265,7 @@ where $x_{\uparrow 4}$ is the signal upsampled 4× to capture inter-sample peaks
 | Integrated Loudness | LUFS | Gated $L_K$. Streaming target: $-16$ to $-14$ LUFS |
 | Loudness Range (LRA) | LU | $L_{\text{hi},95} - L_{\text{lo},10}$ over gated 3 s blocks (EBU R128) |
 | Max Short-Term Loudness | LUFS | $\max_t L_K(t)$ over a sliding 3 s window |
-| True Peak | dBTP | $L_\text{TP}$ — 4× oversampled inter-sample peak. Streaming limit: $-1$ dBTP |
+| True Peak | dBTP | $L_{\text{TP}}$ — 4× oversampled inter-sample peak. Streaming limit: $-1$ dBTP |
 
 ---
 
@@ -281,17 +281,17 @@ $$B_t = \sqrt{\frac{\sum_k (f_k - C_t)^2 \, P_t[k]}{\sum_k P_t[k]}}, \qquad B = 
 
 **Spectral Rolloff** (95th-percentile energy frequency):
 
-$$R_t = \min\Bigl\{ f : \sum_{k:\, f_k \leq f} P_t[k] \;\geq\; 0.95 \sum_k P_t[k] \Bigr\}, \qquad R = \langle R_t \rangle_t$$
+$$R_t = \min\left\{ f : \sum_{k:\, f_k \leq f} P_t[k] \;\geq\; 0.95 \sum_k P_t[k] \right\}, \qquad R = \langle R_t \rangle_t$$
 
 **Spectral Flatness** (geometric-to-arithmetic power mean ratio):
 
-$$F_t = \frac{\exp\!\bigl(\tfrac{1}{K}\sum_k \ln P_t[k]\bigr)}{\tfrac{1}{K}\sum_k P_t[k]}, \qquad F_\text{dB} = 10\log_{10}\langle F_t \rangle_t$$
+$$F_t = \frac{\exp\!\left(\frac{1}{K}\sum_k \ln P_t[k]\right)}{\frac{1}{K}\sum_k P_t[k]}, \qquad F_{\text{dB}} = 10\log_{10}\langle F_t \rangle_t$$
 
-$F_\text{dB} = 0$ dB corresponds to white noise; more negative values indicate tonal content.
+$F_{\text{dB}} = 0$ dB corresponds to white noise; more negative values indicate tonal content.
 
 **Spectral Flux:**
 
-$$\Phi_t = \sqrt{\sum_k \bigl(\lvert X_t[k] \rvert - \lvert X_{t-1}[k] \rvert\bigr)^2}, \qquad \Phi = \langle \Phi_t \rangle_t$$
+$$\Phi_t = \sqrt{\sum_k \left(\lvert X_t[k] \rvert - \lvert X_{t-1}[k] \rvert\right)^2}, \qquad \Phi = \langle \Phi_t \rangle_t$$
 
 **Spectral Entropy:**
 
@@ -299,7 +299,7 @@ $$H_t = -\sum_k p_{t,k} \log_2 p_{t,k}, \quad p_{t,k} = \frac{P_t[k]}{\sum_j P_t
 
 **Estimated F0** (autocorrelation):
 
-$$\hat{f}_0 = \frac{f_s}{\hat{\tau}}, \qquad \hat{\tau} = \operatorname*{arg\,max}_{\tau \in [\tau_\min, \tau_\max]} R_{xx}[\tau]$$
+$$\hat{f}_0 = \frac{f_s}{\hat{\tau}}, \qquad \hat{\tau} = \arg\max_{\tau \in [\tau_{\min},\, \tau_{\max}]} R_{xx}[\tau]$$
 
 where $R_{xx}[\tau] = \sum_n x[n]\,x[n+\tau]$ is the autocorrelation at lag $\tau$.
 
@@ -312,7 +312,7 @@ $$E_B = \frac{\sum_{k:\, f_k \in B} P[k]}{\sum_k P[k]} \times 100\%$$
 | Spectral Centroid | Hz | $C$ — center of mass of the power spectrum |
 | Spectral Bandwidth | Hz | $B$ — weighted std dev around centroid |
 | Spectral Rolloff (95%) | Hz | $R$ — frequency below which 95% of energy falls |
-| Spectral Flatness | dB | $F_\text{dB}$ — 0 dB = white noise; more negative = tonal |
+| Spectral Flatness | dB | $F_{\text{dB}}$ — 0 dB = white noise; more negative = tonal |
 | Spectral Flux | — | $\Phi$ — mean frame-to-frame magnitude change |
 | Spectral Skewness | — | Third standardized moment of $P_t[k]$ over $k$ |
 | Spectral Entropy | bits | $H$ — 0 = single tone; $\log_2 K$ = white noise |
@@ -333,7 +333,7 @@ Time-domain structure, speech activity, and pause patterns. Frame energy at fram
 
 $$E_m = \frac{1}{L}\sum_{n=0}^{L-1} x[mH + n]^2$$
 
-where $L$ = frame length (25 ms), $H$ = hop size (10 ms), $M$ = total number of frames, and $E_m^\text{dB} = 10\log_{10}(E_m)$. The VAD threshold is $\theta = \max\!\bigl(\text{P}_{30}(E^\text{dB}),\, -50\,\text{dBFS}\bigr)$, where $\text{P}_{30}$ is the 30th percentile of all frame energies.
+where $L$ = frame length (25 ms), $H$ = hop size (10 ms), $M$ = total number of frames, and $E_m^{\text{dB}} = 10\log_{10}(E_m)$. The VAD threshold is $\theta = \max(\text{P}_{30}(E^{\text{dB}}),\, {-50}\,\text{dBFS})$, where $\text{P}_{30}$ is the 30th percentile of all frame energies.
 
 **Temporal Centroid:**
 
@@ -343,13 +343,13 @@ where $t_m = m H / f_s$ is the time of frame $m$ in seconds.
 
 | Metric | Unit | Description |
 |--------|------|-------------|
-| Speech/Activity Ratio | % | $\frac{1}{M}\sum_m \mathbf{1}[E_m^\text{dB} > \theta] \times 100$ |
+| Speech/Activity Ratio | % | $\frac{1}{M}\sum_m \mathbf{1}[E_m^{\text{dB}} > \theta] \times 100$ |
 | Attack Time | ms | Time to reach $0.9 \cdot \max_m E_m$ from start |
 | Temporal Centroid | s | $\bar{t}$ — energy-weighted mean time |
 | Num Pauses (>100 ms) | — | Count of contiguous inactive runs longer than 100 ms |
 | Mean Pause Duration | s | Mean length of detected pauses |
 | Max Pause Duration | s | Length of the longest detected pause |
-| Energy Variance | dB² | $\operatorname{Var}(E^\text{dB})$ — high = dynamic, low = monotone |
+| Energy Variance | dB² | $\operatorname{Var}(E^{\text{dB}})$ — high = dynamic, low = monotone |
 | ZCR Mean | crossings/sample | $\langle \text{ZCR}_m \rangle_m$ |
 | ZCR Variance | — | $\operatorname{Var}(\text{ZCR}_m)$ |
 
@@ -359,19 +359,19 @@ where $t_m = m H / f_s$ is the time of frame $m$ in seconds.
 
 Noise floor and signal quality estimates. The noise floor $\hat{N}$ is the mean energy of the quietest 10% of frames.
 
-$$\text{SNR} = 10\log_{10}\!\left(\frac{P_\text{signal}}{P_\text{noise}}\right) \;\text{dB}$$
+$$\text{SNR} = 10\log_{10}\left(\frac{P_{\text{signal}}}{P_{\text{noise}}}\right) \;\text{dB}$$
 
-where $P_\text{signal}$ is the mean frame power of the most active 50% of frames and $P_\text{noise}$ is the mean frame power of the quietest 10%.
+where $P_{\text{signal}}$ is the mean frame power of the most active 50% of frames and $P_{\text{noise}}$ is the mean frame power of the quietest 10%.
 
-$$\text{HNR} = 10\log_{10}\!\left(\frac{P_\text{harmonic}}{P_\text{aperiodic}}\right) \;\text{dB}$$
+$$\text{HNR} = 10\log_{10}\left(\frac{P_{\text{harmonic}}}{P_{\text{aperiodic}}}\right) \;\text{dB}$$
 
-where $P_\text{harmonic}$ is the power at harmonic multiples of the estimated F0, and $P_\text{aperiodic}$ is the residual noise power.
+where $P_{\text{harmonic}}$ is the power at harmonic multiples of the estimated F0, and $P_{\text{aperiodic}}$ is the residual noise power.
 
 | Metric | Unit | Description |
 |--------|------|-------------|
-| Estimated Noise Floor | dBFS | $\hat{N} = \langle E_m^\text{dB} \rangle$ over quietest 10% of frames |
-| Estimated SNR | dB | $\langle E_m^\text{dB} \rangle_\text{active} - \hat{N}$ |
-| Spectral SNR | dB | $10\log_{10}(P_\text{active} / P_\text{quiet})$ in the frequency domain |
+| Estimated Noise Floor | dBFS | $\hat{N} = \langle E_m^{\text{dB}} \rangle$ over quietest 10% of frames |
+| Estimated SNR | dB | $\langle E_m^{\text{dB}} \rangle_{\text{active}} - \hat{N}$ |
+| Spectral SNR | dB | $10\log_{10}(P_{\text{active}} / P_{\text{quiet}})$ in the frequency domain |
 | Harmonic-to-Noise Ratio (HNR) | dB | HNR — higher = cleaner voiced speech |
 | Near-Clipped Samples | count | Samples within 1 dB of full scale |
 | Detected Dropouts | count | Sudden near-silence drops in otherwise active audio |
@@ -388,7 +388,7 @@ where $m_j = \log(\mathbf{f}_j^\top \mathbf{p} + \varepsilon)$ is the log energy
 
 MFCC statistics over $T$ frames:
 
-$$\bar{c}_k = \frac{1}{T}\sum_{t=1}^T c_k(t), \qquad \sigma_k = \sqrt{\frac{1}{T}\sum_{t=1}^T \bigl(c_k(t) - \bar{c}_k\bigr)^2}$$
+$$\bar{c}_k = \frac{1}{T}\sum_{t=1}^T c_k(t), \qquad \sigma_k = \sqrt{\frac{1}{T}\sum_{t=1}^T \left(c_k(t) - \bar{c}_k\right)^2}$$
 
 | Metric | Unit | Description |
 |--------|------|-------------|
@@ -424,7 +424,7 @@ where $X_t[k]$ and $R_t[k]$ are the STFT coefficients of the test and reference 
 
 **Cepstral Distance:**
 
-$$\text{CD} = \frac{1}{T}\sum_{t=1}^T \sqrt{\sum_{k=1}^{13}\bigl(c_k(t) - c_k^{(r)}(t)\bigr)^2}$$
+$$\text{CD} = \frac{1}{T}\sum_{t=1}^T \sqrt{\sum_{k=1}^{13}\left(c_k(t) - c_k^{(r)}(t)\right)^2}$$
 
 where $c_k(t)$ and $c_k^{(r)}(t)$ are the $k$-th MFCC of the test and reference signals at frame $t$.
 
@@ -445,21 +445,21 @@ Per-frame F0 trajectory, perturbation measures, and speech rate. All computed vi
 
 **Normalized autocorrelation F0 detection:**
 
-$$r_{xx}[\tau] = \frac{\sum_n x[n]\, x[n+\tau]}{\sum_n x[n]^2}, \qquad \hat{f}_0 = \frac{f_s}{\hat{\tau}}, \qquad \hat{\tau} = \operatorname*{arg\,max}_{\tau \in [\tau_\min,\, \tau_\max]} r_{xx}[\tau]$$
+$$r_{xx}[\tau] = \frac{\sum_n x[n]\, x[n+\tau]}{\sum_n x[n]^2}, \qquad \hat{f}_0 = \frac{f_s}{\hat{\tau}}, \qquad \hat{\tau} = \arg\max_{\tau \in [\tau_{\min},\, \tau_{\max}]} r_{xx}[\tau]$$
 
-where $\tau$ is lag in samples, $\tau_\min = \lfloor f_s / f_{0,\max} \rfloor$ and $\tau_\max = \lfloor f_s / f_{0,\min} \rfloor$ with $f_{0,\min} = 60$ Hz and $f_{0,\max} = 500$ Hz. A frame is voiced when $r_{xx}[\hat{\tau}] > 0.40$.
+where $\tau$ is lag in samples, $\tau_{\min} = \lfloor f_s / f_{0,\max} \rfloor$ and $\tau_{\max} = \lfloor f_s / f_{0,\min} \rfloor$ with $f_{0,\min} = 60$ Hz and $f_{0,\max} = 500$ Hz. A frame is voiced when $r_{xx}[\hat{\tau}] > 0.40$.
 
 **Jitter** (local F0 period perturbation, Baken & Orlikoff 2000):
 
-$$J = \frac{\dfrac{1}{N-1}\sum_{i=1}^{N-1} \lvert T_i - T_{i-1} \rvert}{\dfrac{1}{N}\sum_{i=1}^{N} T_i} \times 100\%$$
+$$J = \frac{1}{\bar{T}(N-1)} \sum_{i=1}^{N-1} \lvert T_i - T_{i-1} \rvert \times 100\%, \qquad \bar{T} = \frac{1}{N}\sum_{i=1}^{N} T_i$$
 
-where $T_i = 1 / f_{0,i}$ is the fundamental period of the $i$-th consecutive voiced frame in seconds, and $N$ is the count of voiced frames.
+where $T_i = 1 / f_{0,i}$ is the fundamental period of the $i$-th consecutive voiced frame in seconds, $\bar{T}$ is the mean period, and $N$ is the count of voiced frames.
 
 **Shimmer** (local amplitude perturbation):
 
-$$S = \frac{\dfrac{1}{N-1}\sum_{i=1}^{N-1} \lvert A_i - A_{i-1} \rvert}{\dfrac{1}{N}\sum_{i=1}^{N} A_i} \times 100\%$$
+$$S = \frac{1}{\bar{A}(N-1)} \sum_{i=1}^{N-1} \lvert A_i - A_{i-1} \rvert \times 100\%, \qquad \bar{A} = \frac{1}{N}\sum_{i=1}^{N} A_i$$
 
-where $A_i$ is the RMS amplitude of voiced frame $i$.
+where $A_i$ is the RMS amplitude of voiced frame $i$ and $\bar{A}$ is the mean amplitude.
 
 | Metric | Unit | Description |
 |--------|------|-------------|
@@ -490,7 +490,7 @@ where $f$ is frequency in Hz.
 
 $$R = \sum_{i < j} \left(\frac{A_i A_j}{A_i^2 + A_j^2}\right)^{3.11} (A_i A_j)^{0.1} \cdot x^2 e^{-(x/0.25)^2}, \qquad x = \frac{\lvert f_j - f_i \rvert}{\text{CBW}(f_i)}$$
 
-where $A_i, A_j$ are normalized amplitudes of the partial pair, $f_i < f_j$ are their frequencies in Hz, $\text{CBW}(f_i) = 25 + 75\bigl(1 + 1.4(f_i/1000)^2\bigr)^{0.69}$ is the critical bandwidth at $f_i$ (Zwicker 1961), and the roughness curve peaks at $x = 0.25$ (Plomp & Levelt 1965).
+where $A_i, A_j$ are normalized amplitudes of the partial pair, $f_i < f_j$ are their frequencies in Hz, $\text{CBW}(f_i) = 25 + 75\left(1 + 1.4(f_i/1000)^2\right)^{0.69}$ is the critical bandwidth at $f_i$ (Zwicker 1961), and the roughness curve peaks at $x = 0.25$ (Plomp & Levelt 1965).
 
 **Sensory Dissonance** (Sethares 1993):
 
@@ -500,19 +500,19 @@ where $b_1 = 3.5$ and $b_2 = 5.75$ are empirical constants from Plomp & Levelt (
 
 **Sharpness** (Zwicker & Fastl 1990; Von Bismarck 1974):
 
-$$S_\text{acum} = 0.11 \frac{\sum_z N'(z)\, g(z)\, z}{\sum_z N'(z)}, \qquad g(z) = \begin{cases} 1 & z \leq 15 \\ 0.066\, e^{0.171 z} & z > 15 \end{cases}$$
+$$S_{\text{acum}} = 0.11 \frac{\sum_z N'(z)\, g(z)\, z}{\sum_z N'(z)}, \qquad g(z) = \begin{cases} 1 & z \leq 15 \\ 0.066\, e^{0.171 z} & z > 15 \end{cases}$$
 
 where $z$ is Bark band index (0–24 Bark), $N'(z)$ is specific loudness in band $z$ (proportional to the square root of mean power in the band), and $g(z)$ is Von Bismarck's (1974) high-frequency weighting function.
 
 **Spectral Flatness and Tonality:**
 
-$$\text{SFM} = \frac{\exp\!\bigl(\tfrac{1}{K}\sum_k \ln P[k]\bigr)}{\tfrac{1}{K}\sum_k P[k]}, \qquad \text{Tonality} = 1 - \text{SFM}$$
+$$\text{SFM} = \frac{\exp\!\left(\frac{1}{K}\sum_k \ln P[k]\right)}{\frac{1}{K}\sum_k P[k]}, \qquad \text{Tonality} = 1 - \text{SFM}$$
 
 | Metric | Unit | Description |
 |--------|------|-------------|
 | Roughness | asper (rel.) | $R$ — Vassilakis AM roughness. High = grating or harsh |
 | Sensory Dissonance | (rel.) | $D$ — Sethares beating model. Low = consonant spectrum |
-| Sharpness | acum | $S_\text{acum}$ — 1 acum = reference 1 kHz narrow-band noise |
+| Sharpness | acum | $S_{\text{acum}}$ — 1 acum = reference 1 kHz narrow-band noise |
 | Spectral Flatness (SFM) | 0–1 | 0 = pure sine tone; 1 = white noise |
 | Tonality | 0–1 | $1 - \text{SFM}$. High = tonal; low = noise-like |
 
@@ -536,7 +536,7 @@ where $A(z) = 1 + a_1 z^{-1} + \cdots + a_p z^{-p}$ is the LPC polynomial, $\ang
 
 **Cepstral Peak Prominence** (Hillenbrand et al. 1994):
 
-$$\text{CPP} = \max_{q \in [q_\min,\, q_\max]} \bigl[ c[q] - \hat{c}[q] \bigr]$$
+$$\text{CPP} = \max_{q \in [q_{\min},\, q_{\max}]} \left[ c[q] - \hat{c}[q] \right]$$
 
 where $c[q] = \lvert \mathcal{F}^{-1}\{\log \lvert X \rvert^2\} \rvert$ is the real cepstrum at quefrency $q$ (samples), $\hat{c}[q]$ is a linear regression baseline over the quefrency range $[f_s / 500,\; f_s / 50]$ (F0 range 50–500 Hz), and CPP is the peak prominence above that baseline.
 
