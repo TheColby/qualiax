@@ -4,7 +4,6 @@ qualiax - Perceptual speech & audio quality analyzer
 from __future__ import annotations
 
 import sys
-import os
 from pathlib import Path
 from typing import Optional
 
@@ -47,11 +46,11 @@ def collect_files(path: Path) -> list[Path]:
             click.echo(f"[warning] Unsupported file type: {path.suffix}", err=True)
             return []
     elif path.is_dir():
-        files = []
-        for ext in SUPPORTED_EXTENSIONS:
-            files.extend(path.rglob(f"*{ext}"))
-            files.extend(path.rglob(f"*{ext.upper()}"))
-        return sorted(set(files))
+        return sorted(
+            candidate
+            for candidate in path.rglob("*")
+            if candidate.is_file() and candidate.suffix.lower() in SUPPORTED_EXTENSIONS
+        )
     else:
         click.echo(f"[error] Path not found: {path}", err=True)
         return []
@@ -60,6 +59,11 @@ def collect_files(path: Path) -> list[Path]:
 @click.command()
 @click.argument("paths", nargs=-1, required=True, type=click.Path(exists=True))
 @click.option("--silent", is_flag=True, help="Suppress console output (useful with --output).")
+@click.option("--save-sidecar", is_flag=True,
+              help="Write per-file JSON + CSV sidecars next to each analyzed source. "
+                   "This is also the default behavior when --output is not provided.")
+@click.option("--force", is_flag=True,
+              help="Allow overwriting existing output or sidecar files.")
 @click.option("--output", "-o", type=click.Path(), default=None,
               help="Write results to a file (format determined by extension: .json, .csv).")
 @click.option("--format", "-f", "fmt", type=click.Choice(["pretty", "json", "csv"]),
@@ -68,7 +72,8 @@ def collect_files(path: Path) -> list[Path]:
               help="Reference audio file for intrusive metrics (PESQ, STOI, SI-SDR, etc.).")
 @click.option("--metrics", "-m", default=None,
               help="Comma-separated list of metric groups to include. "
-                   "Groups: basic, loudness, spectral, temporal, noise, speech, perceptual, all. "
+                   "Groups: basic, loudness, spectral, temporal, noise, speech, perceptual, "
+                   "prosody, psychoacoustic, speaker, all. "
                    "Default: all.")
 @click.option("--no-color", is_flag=True, help="Disable colored output.")
 @click.option("--verbose", "-v", is_flag=True, help="Show analysis progress and warnings.")
@@ -77,6 +82,8 @@ def collect_files(path: Path) -> list[Path]:
 def main(
     paths: tuple[str, ...],
     silent: bool,
+    save_sidecar: bool,
+    force: bool,
     output: Optional[str],
     fmt: str,
     reference: Optional[str],
@@ -111,6 +118,26 @@ def main(
         click.echo("[error] No supported audio files found.", err=True)
         sys.exit(1)
 
+    # Default: write JSON+CSV sidecars when no explicit --output is given
+    write_sidecars = save_sidecar or not output
+
+    if silent and not output and not write_sidecars:
+        raise click.UsageError("--silent requires --output or --save-sidecar.")
+
+    if write_sidecars and not force:
+        existing = [
+            str(p.with_suffix(ext))
+            for p in all_files
+            for ext in (".json", ".csv")
+            if p.with_suffix(ext).exists()
+        ]
+        if existing:
+            raise click.ClickException(
+                "Refusing to overwrite existing sidecar file(s) without --force: "
+                + ", ".join(existing[:3])
+                + (" ..." if len(existing) > 3 else "")
+            )
+
     # --- Parse metric groups ---
     requested_groups = _parse_metric_groups(metrics)
 
@@ -135,17 +162,19 @@ def main(
     results = analyzer.analyze_all(all_files, on_progress=_on_progress)
 
     # --- Report ---
-    # Default: save JSON alongside each source file (filename.wav → filename.json)
-    if not output:
+    if write_sidecars:
         for r, p in zip(results, all_files):
-            auto_path = p.with_suffix(".json")
-            text = JsonReporter().render([r])
-            auto_path.write_text(text, encoding="utf-8")
+            p.with_suffix(".json").write_text(JsonReporter().render([r]), encoding="utf-8")
+            p.with_suffix(".csv").write_text(CsvReporter().render([r]), encoding="utf-8")
         if not silent:
-            click.echo(f"JSON saved alongside source file(s)", err=True)
+            click.echo("JSON + CSV saved alongside source file(s)", err=True)
 
     if output:
         out_path = Path(output)
+        if out_path.exists() and not force:
+            raise click.ClickException(
+                f"Refusing to overwrite existing output file without --force: {out_path}"
+            )
         out_fmt = _detect_format(out_path, fmt)
         reporter = _make_reporter(out_fmt, color=False)
         text = reporter.render(results)
@@ -170,12 +199,20 @@ def _parse_metric_groups(metrics: Optional[str]) -> set[str]:
     }
     if not metrics:
         return {"all"}
-    groups = {g.strip().lower() for g in metrics.split(",")}
+    groups = {g.strip().lower() for g in metrics.split(",") if g.strip()}
+    if not groups:
+        raise click.BadParameter(
+            "Provide at least one metric group.",
+            param_hint="--metrics",
+        )
     unknown = groups - valid
     if unknown:
-        click.echo(f"[warning] Unknown metric groups: {', '.join(unknown)}. "
-                   f"Valid groups: {', '.join(sorted(valid))}", err=True)
-    return groups or {"all"}
+        raise click.BadParameter(
+            f"Unknown metric groups: {', '.join(sorted(unknown))}. "
+            f"Valid groups: {', '.join(sorted(valid))}",
+            param_hint="--metrics",
+        )
+    return groups
 
 
 def _detect_format(path: Path, fallback: str) -> str:
@@ -193,3 +230,7 @@ def _make_reporter(fmt: str, color: bool):
     if fmt == "csv":
         return CsvReporter()
     return ConsoleReporter(color=color)
+
+
+if __name__ == "__main__":
+    main()
