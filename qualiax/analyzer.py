@@ -99,16 +99,25 @@ class AudioAnalyzer:
         self.workers = max(1, workers)
         self._ref_audio: Optional[np.ndarray] = None
         self._ref_sr: Optional[int] = None
+        self._reference_error: Optional[str] = None
 
     def _load_reference(self):
-        if self.reference and self._ref_audio is None:
-            try:
-                self._ref_audio, self._ref_sr = AudioLoader.load(self.reference)
-                if self.verbose:
-                    print(f"[info] Loaded reference: {self.reference.name} "
-                          f"({self._ref_sr} Hz, {self._ref_audio.shape})")
-            except Exception as e:
-                warnings.warn(f"Failed to load reference file: {e}")
+        if not self.reference:
+            return
+        if self._reference_error:
+            raise RuntimeError(self._reference_error)
+        if self._ref_audio is not None:
+            return
+        try:
+            self._ref_audio, self._ref_sr = AudioLoader.load(self.reference)
+            if self.verbose:
+                print(f"[info] Loaded reference: {self.reference.name} "
+                      f"({self._ref_sr} Hz, {self._ref_audio.shape})")
+        except Exception as e:
+            self._reference_error = (
+                f"Failed to load reference file '{self.reference}': {e}"
+            )
+            raise RuntimeError(self._reference_error) from e
 
     def _resolve_groups(self) -> list[str]:
         if "all" in self.metric_groups:
@@ -136,7 +145,11 @@ class AudioAnalyzer:
                   f"({sr} Hz, {result.channels}ch, {result.duration_s:.1f}s)")
 
         # Load reference once
-        self._load_reference()
+        try:
+            self._load_reference()
+        except Exception as e:
+            result.error = str(e)
+            return result
 
         # Run each metric group
         groups = self._resolve_groups()
@@ -151,6 +164,7 @@ class AudioAnalyzer:
                         ref_sr=self._ref_sr,
                     )
                     for w in caught:
+                        result.notes.append(f"{group_name}: {w.message}")
                         if self.verbose:
                             print(f"  [warn] {w.message}")
                 result.metrics.extend(metrics)
@@ -161,6 +175,7 @@ class AudioAnalyzer:
                     description=str(e),
                     group=group_name,
                 ))
+                result.notes.append(f"{group_name}: group failed ({e})")
 
         return result
 

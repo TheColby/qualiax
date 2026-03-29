@@ -38,6 +38,7 @@ class FileResult:
     """All metrics for a single audio file."""
     path: str
     metrics: list[MetricResult] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
     error: Optional[str] = None
     duration_s: float = 0.0
     sample_rate: int = 0
@@ -57,6 +58,7 @@ class FileResult:
             "sample_rate": self.sample_rate,
             "channels": self.channels,
             "bit_depth": self.bit_depth,
+            "notes": self.notes,
             "error": self.error,
             "metrics": [
                 {

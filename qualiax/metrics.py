@@ -212,8 +212,8 @@ def compute_loudness(audio: NDArray, sr: int, ref_audio=None, ref_sr=None) -> li
                 if sq > 0:
                     vals.append(-0.691 + 10 * math.log10(sq))
             max_short_term = max(vals) if vals else None
-    except Exception:
-        pass
+    except Exception as e:
+        warnings.warn(f"Metric 'Max Short-Term Loudness' failed: {e}")
 
     # True peak (oversample 4x via upsampling) — GPU-accelerated
     try:
@@ -519,8 +519,8 @@ def compute_noise(audio: NDArray, sr: int, ref_audio=None, ref_sr=None) -> list[
             spectral_snr = float(10 * np.log10(
                 (np.mean(sig_spec ** 2) + _eps()) / (np.mean(noise_spec ** 2) + _eps())
             ))
-    except Exception:
-        pass
+    except Exception as e:
+        warnings.warn(f"Metric 'Spectral SNR' failed: {e}")
 
     # Harmonic-to-Noise Ratio (HNR) via autocorrelation
     hnr = _compute_hnr(mono, sr)
@@ -632,8 +632,8 @@ def compute_speech(audio: NDArray, sr: int, ref_audio=None, ref_sr=None) -> list
     # Formant-inspired band ratios (approximate F1/F2 regions)
     try:
         from scipy.signal import stft as scipy_stft
-        f, _, mag = scipy_stft(mono, fs=sr, nperseg=1024, noverlap=768)
-        power = mag ** 2
+        f, _, Zxx = scipy_stft(mono, fs=sr, nperseg=1024, noverlap=768)
+        power = np.abs(Zxx) ** 2
         total = power.sum(axis=0) + _eps()
 
         def band_ratio(flo, fhi):
@@ -653,8 +653,8 @@ def compute_speech(audio: NDArray, sr: int, ref_audio=None, ref_sr=None) -> list
             MetricResult("F3-Region Energy (2.5–3.5 kHz)", f3_band * 100, "%",
                          "Energy in third formant region (voice timbre)", "speech"),
         ]
-    except Exception:
-        pass
+    except Exception as e:
+        warnings.warn(f"Metric 'Speech formant-region energy' failed: {e}")
 
     # Voiced/unvoiced ratio
     vu_ratio = _voiced_unvoiced_ratio(mono, sr)

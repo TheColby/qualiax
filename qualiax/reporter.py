@@ -52,7 +52,18 @@ def _fmt_value(m: MetricResult, color: bool) -> str:
     return fv
 
 
-GROUP_ORDER = ["basic", "loudness", "spectral", "temporal", "noise", "speech", "perceptual"]
+GROUP_ORDER = [
+    "basic",
+    "loudness",
+    "spectral",
+    "temporal",
+    "noise",
+    "speech",
+    "perceptual",
+    "prosody",
+    "psychoacoustic",
+    "speaker",
+]
 
 GROUP_LABELS = {
     "basic":      "📊  Basic File Info",
@@ -62,6 +73,9 @@ GROUP_LABELS = {
     "noise":      "🔇  Noise & Distortion",
     "speech":     "🗣️  Speech Features",
     "perceptual": "👁️  Perceptual Quality Metrics",
+    "prosody":    "🎙️  Prosody & Voice Dynamics",
+    "psychoacoustic": "🧠  Psychoacoustic Analysis",
+    "speaker":    "🪪  Speaker Characteristics",
 }
 
 
@@ -102,6 +116,13 @@ class ConsoleReporter:
             f"{result.channels}ch", Color.GRAY
         ))
         lines.append(self._c(sep, Color.CYAN, Color.BOLD))
+
+        if result.notes:
+            lines.append("")
+            lines.append(self._c("  Notes", Color.BOLD, Color.YELLOW))
+            lines.append(self._c("  " + "─" * 68, Color.DIM))
+            for note in result.notes:
+                lines.append(self._c(f"    - {note}", Color.YELLOW))
 
         # Group metrics
         groups = result.metrics_by_group()
@@ -145,14 +166,20 @@ class ConsoleReporter:
 
 class JsonReporter:
     def render(self, results: list[FileResult]) -> str:
-        data = [r.to_dict() for r in results]
-        return json.dumps(data, indent=2, ensure_ascii=False, default=_json_default)
+        data = _sanitize_for_json([r.to_dict() for r in results])
+        return json.dumps(data, indent=2, ensure_ascii=False, allow_nan=False)
 
 
-def _json_default(obj):
+def _sanitize_for_json(obj):
+    if isinstance(obj, dict):
+        return {key: _sanitize_for_json(value) for key, value in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_for_json(value) for value in obj]
+    if isinstance(obj, tuple):
+        return [_sanitize_for_json(value) for value in obj]
     if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
         return None
-    raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+    return obj
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -172,7 +199,7 @@ class CsvReporter:
                     all_metric_names.append(m.name)
                     seen.add(m.name)
 
-        fieldnames = ["file", "duration_s", "sample_rate", "channels", "error"] + all_metric_names
+        fieldnames = ["file", "duration_s", "sample_rate", "channels", "notes", "error"] + all_metric_names
         writer = csv.DictWriter(buf, fieldnames=fieldnames)
         writer.writeheader()
 
@@ -182,6 +209,7 @@ class CsvReporter:
                 "duration_s": r.duration_s,
                 "sample_rate": r.sample_rate,
                 "channels": r.channels,
+                "notes": " | ".join(r.notes),
                 "error": r.error or "",
             }
             metric_lookup = {m.name: m.value for m in r.metrics}
