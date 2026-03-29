@@ -125,6 +125,132 @@ def _shimmer_local(audio: NDArray, sr: int, f0_arr: NDArray) -> Optional[float]:
     return float(np.mean(diffs) / (np.mean(arr) + 1e-14))
 
 
+# ─── Extended Jitter measures ─────────────────────────────────────────────────
+
+def _jitter_rap(f0_arr: NDArray) -> Optional[float]:
+    """Relative Average Perturbation (3-period smoothing window)."""
+    voiced = f0_arr[f0_arr > 0]
+    if len(voiced) < 5:
+        return None
+    periods = 1.0 / voiced
+    t_mean = float(np.mean(periods))
+    running_avg = (periods[:-2] + periods[1:-1] + periods[2:]) / 3.0
+    return float(np.mean(np.abs(periods[1:-1] - running_avg)) / (t_mean + 1e-14))
+
+
+def _jitter_ppq5(f0_arr: NDArray) -> Optional[float]:
+    """5-point Period Perturbation Quotient."""
+    voiced = f0_arr[f0_arr > 0]
+    if len(voiced) < 7:
+        return None
+    periods = 1.0 / voiced
+    t_mean = float(np.mean(periods))
+    diffs = [abs(periods[i] - np.mean(periods[i - 2:i + 3]))
+             for i in range(2, len(periods) - 2)]
+    return float(np.mean(diffs) / (t_mean + 1e-14)) if diffs else None
+
+
+def _jitter_ddp(f0_arr: NDArray) -> Optional[float]:
+    """DDP: mean absolute second difference of periods (= 2× RAP for symmetric windows)."""
+    voiced = f0_arr[f0_arr > 0]
+    if len(voiced) < 5:
+        return None
+    periods = 1.0 / voiced
+    t_mean = float(np.mean(periods))
+    d2 = np.abs(np.diff(np.diff(periods)))
+    return float(np.mean(d2) / (t_mean + 1e-14))
+
+
+# ─── Extended Shimmer measures ────────────────────────────────────────────────
+
+def _get_voiced_rms(audio: NDArray, sr: int, f0_arr: NDArray) -> Optional[NDArray]:
+    """Per-voiced-frame RMS amplitude array."""
+    frame_len = int(0.025 * sr)
+    hop_len   = int(0.010 * sr)
+    voiced_idx = np.where(f0_arr > 0)[0]
+    rms_vals = []
+    for i in voiced_idx:
+        start = i * hop_len
+        end   = start + frame_len
+        if end > len(audio):
+            break
+        rms = float(np.sqrt(np.mean(audio[start:end] ** 2)))
+        if rms > 1e-6:
+            rms_vals.append(rms)
+    return np.array(rms_vals) if len(rms_vals) >= 5 else None
+
+
+def _shimmer_apq3(audio: NDArray, sr: int, f0_arr: NDArray) -> Optional[float]:
+    """3-point Amplitude Perturbation Quotient."""
+    arr = _get_voiced_rms(audio, sr, f0_arr)
+    if arr is None or len(arr) < 5:
+        return None
+    a_mean = float(np.mean(arr))
+    running_avg = (arr[:-2] + arr[1:-1] + arr[2:]) / 3.0
+    return float(np.mean(np.abs(arr[1:-1] - running_avg)) / (a_mean + 1e-14))
+
+
+def _shimmer_apq5(audio: NDArray, sr: int, f0_arr: NDArray) -> Optional[float]:
+    """5-point Amplitude Perturbation Quotient."""
+    arr = _get_voiced_rms(audio, sr, f0_arr)
+    if arr is None or len(arr) < 7:
+        return None
+    a_mean = float(np.mean(arr))
+    diffs = [abs(arr[i] - np.mean(arr[i - 2:i + 3]))
+             for i in range(2, len(arr) - 2)]
+    return float(np.mean(diffs) / (a_mean + 1e-14)) if diffs else None
+
+
+def _shimmer_dda(audio: NDArray, sr: int, f0_arr: NDArray) -> Optional[float]:
+    """DDA shimmer = mean absolute second difference of amplitudes."""
+    arr = _get_voiced_rms(audio, sr, f0_arr)
+    if arr is None or len(arr) < 5:
+        return None
+    a_mean = float(np.mean(arr))
+    d2 = np.abs(np.diff(np.diff(arr)))
+    return float(np.mean(d2) / (a_mean + 1e-14))
+
+
+# ─── Noise-to-Harmonics Ratio ─────────────────────────────────────────────────
+
+def _nhr(audio: NDArray, sr: int, f0_arr: NDArray) -> Optional[float]:
+    """
+    Noise-to-Harmonics Ratio.
+
+    Harmonic power is estimated as the sum of STFT power within ±2 bins of
+    each integer multiple of the mean F0 (up to Nyquist).  Everything else
+    is treated as noise.  NHR = noise_power / harmonic_power.
+    """
+    try:
+        from scipy.signal import stft as scipy_stft
+        voiced = f0_arr[f0_arr > 0]
+        if len(voiced) < 4:
+            return None
+        f0_mean = float(np.mean(voiced))
+
+        n_fft = 1024
+        _, _, Zxx = scipy_stft(audio, fs=sr, nperseg=n_fft,
+                               noverlap=n_fft * 3 // 4)
+        mean_power = (np.abs(Zxx) ** 2).mean(axis=1)   # (n_fft//2+1,)
+        total_power = float(mean_power.sum()) + 1e-14
+
+        bin_hz     = sr / n_fft
+        max_harm   = int((sr / 2.0) / f0_mean)
+        harmonic_p = 0.0
+        for h in range(1, min(max_harm + 1, 20)):
+            c = int(round(h * f0_mean / bin_hz))
+            lo = max(0, c - 2)
+            hi = min(len(mean_power), c + 3)
+            harmonic_p += float(mean_power[lo:hi].sum())
+
+        harmonic_p = min(harmonic_p, total_power)
+        noise_p    = total_power - harmonic_p
+        return float(noise_p / (harmonic_p + 1e-14))
+    except Exception as e:
+        warnings.warn(f"Metric 'Noise-to-Harmonics Ratio (prosody)' failed: {e}")
+        return None
+
+
 # ─── Tremor ───────────────────────────────────────────────────────────────────
 
 def _tremor(voiced_f0: NDArray, hop_s: float) -> tuple[Optional[float], Optional[float]]:
@@ -280,6 +406,38 @@ def compute_prosody(
             warning="Elevated jitter — may indicate vocal roughness" if jitter_pct > 1.0 else None,
         ))
 
+    rap = _jitter_rap(f0_arr)
+    if rap is not None:
+        results.append(MetricResult(
+            "Jitter (RAP)", round(rap * 100, 4), "%",
+            "Relative Average Perturbation: 3-period smoothed jitter. Normal: < 0.68%",
+            "prosody",
+            higher_is_better=False,
+            reference_range=(0.0, 0.68),
+            warning="Elevated RAP jitter" if rap * 100 > 0.68 else None,
+        ))
+
+    ppq5 = _jitter_ppq5(f0_arr)
+    if ppq5 is not None:
+        results.append(MetricResult(
+            "Jitter (PPQ5)", round(ppq5 * 100, 4), "%",
+            "5-point Period Perturbation Quotient. Normal: < 0.84%",
+            "prosody",
+            higher_is_better=False,
+            reference_range=(0.0, 0.84),
+            warning="Elevated PPQ5 jitter" if ppq5 * 100 > 0.84 else None,
+        ))
+
+    ddp = _jitter_ddp(f0_arr)
+    if ddp is not None:
+        results.append(MetricResult(
+            "Jitter (DDP)", round(ddp * 100, 4), "%",
+            "Mean absolute second difference of periods (≈ 3× RAP). Normal: < 2.0%",
+            "prosody",
+            higher_is_better=False,
+            reference_range=(0.0, 2.0),
+        ))
+
     # ── Shimmer ─────────────────────────────────────────────────────────────
     shimmer = _shimmer_local(mono, sr, f0_arr)
     if shimmer is not None:
@@ -291,6 +449,50 @@ def compute_prosody(
             higher_is_better=False,
             reference_range=(0.0, 3.0),
             warning="Elevated shimmer — may indicate breathiness" if shimmer_pct > 3.0 else None,
+        ))
+
+    apq3 = _shimmer_apq3(mono, sr, f0_arr)
+    if apq3 is not None:
+        results.append(MetricResult(
+            "Shimmer (APQ3)", round(apq3 * 100, 4), "%",
+            "3-point Amplitude Perturbation Quotient. Normal: < 3.07%",
+            "prosody",
+            higher_is_better=False,
+            reference_range=(0.0, 3.07),
+            warning="Elevated APQ3 shimmer" if apq3 * 100 > 3.07 else None,
+        ))
+
+    apq5 = _shimmer_apq5(mono, sr, f0_arr)
+    if apq5 is not None:
+        results.append(MetricResult(
+            "Shimmer (APQ5)", round(apq5 * 100, 4), "%",
+            "5-point Amplitude Perturbation Quotient. Normal: < 4.23%",
+            "prosody",
+            higher_is_better=False,
+            reference_range=(0.0, 4.23),
+        ))
+
+    dda = _shimmer_dda(mono, sr, f0_arr)
+    if dda is not None:
+        results.append(MetricResult(
+            "Shimmer (DDA)", round(dda * 100, 4), "%",
+            "Mean absolute second difference of amplitudes (≈ 3× APQ3). Normal: < 9.0%",
+            "prosody",
+            higher_is_better=False,
+            reference_range=(0.0, 9.0),
+        ))
+
+    # ── NHR ─────────────────────────────────────────────────────────────────
+    nhr = _nhr(mono, sr, f0_arr)
+    if nhr is not None:
+        results.append(MetricResult(
+            "NHR (Noise-to-Harmonics Ratio)", round(nhr, 6), "",
+            "Ratio of non-harmonic to harmonic energy. Normal voice: < 0.19. "
+            "Higher values indicate breathiness or noise.",
+            "prosody",
+            higher_is_better=False,
+            reference_range=(0.0, 0.19),
+            warning="Elevated NHR — possible breathiness or noise" if nhr > 0.19 else None,
         ))
 
     # ── Tremor ──────────────────────────────────────────────────────────────

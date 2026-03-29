@@ -10,6 +10,7 @@ import math
 from typing import Optional
 
 from .models import FileResult, MetricResult
+from .version import OUTPUT_SCHEMA_VERSION, __version__
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ANSI color helpers
@@ -111,9 +112,19 @@ class ConsoleReporter:
             lines.append(self._c(sep, Color.CYAN, Color.BOLD))
             return "\n".join(lines)
 
+        if result.content_type:
+            if result.speech_confidence is not None:
+                ct_tag = (
+                    f"  [{result.content_type}, "
+                    f"speech={result.speech_confidence:.2f}]"
+                )
+            else:
+                ct_tag = f"  [{result.content_type}]"
+        else:
+            ct_tag = ""
         lines.append(self._c(
             f"  {result.duration_s:.3f}s  |  {result.sample_rate} Hz  |  "
-            f"{result.channels}ch", Color.GRAY
+            f"{result.channels}ch{ct_tag}", Color.GRAY
         ))
         lines.append(self._c(sep, Color.CYAN, Color.BOLD))
 
@@ -199,16 +210,31 @@ class CsvReporter:
                     all_metric_names.append(m.name)
                     seen.add(m.name)
 
-        fieldnames = ["file", "duration_s", "sample_rate", "channels", "notes", "error"] + all_metric_names
+        fieldnames = [
+            "schema_version",
+            "tool_version",
+            "file",
+            "duration_s",
+            "sample_rate",
+            "channels",
+            "content_type",
+            "speech_confidence",
+            "notes",
+            "error",
+        ] + all_metric_names
         writer = csv.DictWriter(buf, fieldnames=fieldnames)
         writer.writeheader()
 
         for r in results:
             row: dict = {
+                "schema_version": OUTPUT_SCHEMA_VERSION,
+                "tool_version": __version__,
                 "file": r.path,
                 "duration_s": r.duration_s,
                 "sample_rate": r.sample_rate,
                 "channels": r.channels,
+                "content_type": r.content_type or "",
+                "speech_confidence": r.speech_confidence if r.speech_confidence is not None else "",
                 "notes": " | ".join(r.notes),
                 "error": r.error or "",
             }

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qualiax"
-version = "0.1.0"
+version = "0.3.0"
 description = "Perceptual speech and audio quality analyzer CLI"
 readme = "README.md"
 license = { text = "MIT" }

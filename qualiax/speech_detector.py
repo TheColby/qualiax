@@ -82,7 +82,8 @@ def _cue_speech_band_energy(mono: NDArray, sr: int) -> float:
         # Speech: 0.6-0.85. Music: 0.3-0.6. Noise: ~0.5 (uniform). Silence: undefined.
         # Score peaks around 0.72.
         return float(np.clip(1.0 - abs(speech_ratio - 0.72) / 0.4, 0.0, 1.0))
-    except Exception:
+    except Exception as e:
+        warnings.warn(f"speech_detector: speech band cue failed: {e}")
         return 0.5
 
 
@@ -133,7 +134,8 @@ def _cue_f0_in_speech_range(mono: NDArray, sr: int) -> tuple[float, Optional[flo
             score = 0.25
 
         return score, f0 if in_range else None
-    except Exception:
+    except Exception as e:
+        warnings.warn(f"speech_detector: F0 cue failed: {e}")
         return 0.5, None
 
 
@@ -164,7 +166,8 @@ def _cue_zcr_bimodality(mono: NDArray, sr: int) -> float:
         # Both fractions should be substantial for speech
         bimodal_score = min(voiced_frac * 2.0, 1.0) * 0.6 + min(unvoiced_frac * 3.0, 1.0) * 0.4
         return float(np.clip(bimodal_score, 0.0, 1.0))
-    except Exception:
+    except Exception as e:
+        warnings.warn(f"speech_detector: ZCR cue failed: {e}")
         return 0.5
 
 
@@ -207,7 +210,8 @@ def _cue_amplitude_modulation(mono: NDArray, sr: int) -> float:
         # Speech: syl_ratio typically 0.25–0.65
         # Noise: low (<0.15), Music: variable
         return float(np.clip((syl_ratio - 0.1) / 0.4, 0.0, 1.0))
-    except Exception:
+    except Exception as e:
+        warnings.warn(f"speech_detector: amplitude modulation cue failed: {e}")
         return 0.5
 
 
@@ -237,7 +241,8 @@ def _cue_spectral_tilt(mono: NDArray, sr: int) -> float:
             # Score peaks around -1.2 (typical voiced speech)
             return float(np.clip(1.0 - abs(slope + 1.2) / 2.0, 0.0, 1.0))
         return 0.1
-    except Exception:
+    except Exception as e:
+        warnings.warn(f"speech_detector: spectral tilt cue failed: {e}")
         return 0.5
 
 
@@ -275,7 +280,8 @@ def _cue_voicing_continuity(mono: NDArray, sr: int) -> float:
         # Speech: typically has runs of 100–500ms. Music: also has runs. Noise: short runs.
         score = float(np.clip(run_ms / 300.0, 0.0, 1.0))
         return score
-    except Exception:
+    except Exception as e:
+        warnings.warn(f"speech_detector: voicing continuity cue failed: {e}")
         return 0.5
 
 
@@ -312,7 +318,8 @@ def _cue_music_discriminator(mono: NDArray, sr: int) -> float:
         )
         # Return "NOT music" score = inverse
         return float(np.clip(1.0 - music_score * 0.7, 0.0, 1.0))
-    except Exception:
+    except Exception as e:
+        warnings.warn(f"speech_detector: music discriminator cue failed: {e}")
         return 0.7
 
 
@@ -343,7 +350,8 @@ def _speech_fraction(mono: NDArray, sr: int) -> float:
             zcr = float(np.mean(np.abs(np.diff(np.sign(frame))) > 0))
             voiced.append(e > 0.0001 and zcr < 0.15)
         return float(np.mean(voiced)) if voiced else 0.0
-    except Exception:
+    except Exception as e:
+        warnings.warn(f"speech_detector: speech fraction cue failed: {e}")
         return 0.0
 
 
@@ -384,18 +392,14 @@ def detect_speech(
             content_type="silence",
         )
 
-    # Run all cues (suppress warnings internally)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-
-        c_band  = _cue_speech_band_energy(mono, sr)
-        c_f0, f0_hz = _cue_f0_in_speech_range(mono, sr)
-        c_zcr   = _cue_zcr_bimodality(mono, sr)
-        c_mod   = _cue_amplitude_modulation(mono, sr)
-        c_tilt  = _cue_spectral_tilt(mono, sr)
-        c_voice = _cue_voicing_continuity(mono, sr)
-        c_nomus = _cue_music_discriminator(mono, sr)
-        spf     = _speech_fraction(mono, sr)
+    c_band  = _cue_speech_band_energy(mono, sr)
+    c_f0, f0_hz = _cue_f0_in_speech_range(mono, sr)
+    c_zcr   = _cue_zcr_bimodality(mono, sr)
+    c_mod   = _cue_amplitude_modulation(mono, sr)
+    c_tilt  = _cue_spectral_tilt(mono, sr)
+    c_voice = _cue_voicing_continuity(mono, sr)
+    c_nomus = _cue_music_discriminator(mono, sr)
+    spf     = _speech_fraction(mono, sr)
 
     cues = {
         "speech_band_energy": c_band,

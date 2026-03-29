@@ -6,16 +6,74 @@ from __future__ import annotations
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+import threading
 from typing import Optional
 
 import numpy as np
 
 from .models import FileResult, MetricResult
 from .metrics import METRIC_GROUPS
+from .speech_detector import detect_speech
+
+# Groups that require speech content to be meaningful
+_SPEECH_ONLY_GROUPS = {"speech", "prosody", "speaker"}
+_NON_SPEECH_PERCEPTUAL_METRICS = {
+    "P.563 Proxy (NB Quality Estimate)",
+    "PESQ (ITU-T P.862)",
+    "PESQ proxy (install `pesq` for true score)",
+    "STOI (Short-Time Objective Intelligibility)",
+    "STOI proxy (install `pystoi` for true score)",
+}
+_MIXED_SPEECH_FRACTION_THRESHOLD = 0.20
 
 
 class AudioLoader:
     """Load audio files to numpy arrays using available backends."""
+
+    @staticmethod
+    def _load_wav_stdlib(path: Path) -> tuple[np.ndarray, int]:
+        """Load PCM WAV via the stdlib wave module."""
+        import wave
+
+        with wave.open(str(path), "rb") as wf:
+            sr = wf.getframerate()
+            n_channels = wf.getnchannels()
+            sample_width = wf.getsampwidth()
+            n_frames = wf.getnframes()
+            comp_type = wf.getcomptype()
+            raw = wf.readframes(n_frames)
+
+        if comp_type != "NONE":
+            raise RuntimeError(f"Unsupported WAV compression type: {comp_type}")
+
+        if sample_width == 1:
+            samples = np.frombuffer(raw, dtype=np.uint8).astype(np.float32)
+            samples = (samples - 128.0) / 128.0
+        elif sample_width == 2:
+            samples = np.frombuffer(raw, dtype="<i2").astype(np.float32)
+            samples /= float(1 << 15)
+        elif sample_width == 3:
+            packed = np.frombuffer(raw, dtype=np.uint8)
+            if len(packed) % 3 != 0:
+                raise RuntimeError("Malformed 24-bit WAV payload.")
+            triplets = packed.reshape(-1, 3).astype(np.int32)
+            samples = (
+                triplets[:, 0]
+                | (triplets[:, 1] << 8)
+                | (triplets[:, 2] << 16)
+            )
+            sign_bit = 1 << 23
+            samples = ((samples ^ sign_bit) - sign_bit).astype(np.float32)
+            samples /= float(1 << 23)
+        elif sample_width == 4:
+            samples = np.frombuffer(raw, dtype="<i4").astype(np.float32)
+            samples /= float(1 << 31)
+        else:
+            raise RuntimeError(f"Unsupported PCM sample width: {sample_width * 8} bits")
+
+        if n_channels > 1:
+            samples = samples.reshape((-1, n_channels)).T
+        return samples, sr
 
     @staticmethod
     def load(path: Path) -> tuple[np.ndarray, int]:
@@ -61,21 +119,7 @@ class AudioLoader:
         # Fallback: raw WAV via stdlib
         if suffix == ".wav":
             try:
-                import wave
-                import struct
-                with wave.open(str(path)) as wf:
-                    sr = wf.getframerate()
-                    n_channels = wf.getnchannels()
-                    sample_width = wf.getsampwidth()
-                    n_frames = wf.getnframes()
-                    raw = wf.readframes(n_frames)
-                fmt = {1: "b", 2: "h", 4: "i"}.get(sample_width, "h")
-                samples = np.array(struct.unpack(f"<{n_frames * n_channels}{fmt}", raw), dtype=np.float32)
-                max_val = 2 ** (sample_width * 8 - 1)
-                samples /= max_val
-                if n_channels > 1:
-                    samples = samples.reshape((-1, n_channels)).T
-                return samples, sr
+                return AudioLoader._load_wav_stdlib(path)
             except Exception as e:
                 raise RuntimeError(f"All loaders failed. Last error: {e}")
 
@@ -100,6 +144,7 @@ class AudioAnalyzer:
         self._ref_audio: Optional[np.ndarray] = None
         self._ref_sr: Optional[int] = None
         self._reference_error: Optional[str] = None
+        self._reference_lock = threading.Lock()
 
     def _load_reference(self):
         if not self.reference:
@@ -108,16 +153,31 @@ class AudioAnalyzer:
             raise RuntimeError(self._reference_error)
         if self._ref_audio is not None:
             return
-        try:
-            self._ref_audio, self._ref_sr = AudioLoader.load(self.reference)
-            if self.verbose:
-                print(f"[info] Loaded reference: {self.reference.name} "
-                      f"({self._ref_sr} Hz, {self._ref_audio.shape})")
-        except Exception as e:
-            self._reference_error = (
-                f"Failed to load reference file '{self.reference}': {e}"
+        with self._reference_lock:
+            if self._reference_error:
+                raise RuntimeError(self._reference_error)
+            if self._ref_audio is not None:
+                return
+            try:
+                self._ref_audio, self._ref_sr = AudioLoader.load(self.reference)
+                if self.verbose:
+                    print(f"[info] Loaded reference: {self.reference.name} "
+                          f"({self._ref_sr} Hz, {self._ref_audio.shape})")
+            except Exception as e:
+                self._reference_error = (
+                    f"Failed to load reference file '{self.reference}': {e}"
+                )
+                raise RuntimeError(self._reference_error) from e
+
+    @staticmethod
+    def _should_run_speech_metrics(detection) -> bool:
+        return (
+            detection.content_type == "speech"
+            or (
+                detection.content_type == "mixed"
+                and detection.speech_fraction >= _MIXED_SPEECH_FRACTION_THRESHOLD
             )
-            raise RuntimeError(self._reference_error) from e
+        )
 
     def _resolve_groups(self) -> list[str]:
         if "all" in self.metric_groups:
@@ -144,6 +204,27 @@ class AudioAnalyzer:
             print(f"[info] Analyzing: {path.name} "
                   f"({sr} Hz, {result.channels}ch, {result.duration_s:.1f}s)")
 
+        # Classify content type using the shared detector
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            detection = detect_speech(audio, sr)
+            result.content_type = detection.content_type
+            result.speech_confidence = detection.confidence
+            for w in caught:
+                result.notes.append(f"content_type: {w.message}")
+        speech_metrics_allowed = self._should_run_speech_metrics(detection)
+        if detection.content_type == "mixed" and speech_metrics_allowed:
+            result.notes.append(
+                "content_type: mixed audio with substantial speech "
+                f"(speech_fraction={detection.speech_fraction:.2f}); "
+                "retaining speech-oriented metrics"
+            )
+        if self.verbose:
+            print(
+                f"  [info] Content type: {result.content_type} "
+                f"(speech_confidence={result.speech_confidence:.2f})"
+            )
+
         # Load reference once
         try:
             self._load_reference()
@@ -154,6 +235,13 @@ class AudioAnalyzer:
         # Run each metric group
         groups = self._resolve_groups()
         for group_name in groups:
+            # Speech gate: skip voice-quality groups for non-speech content
+            if group_name in _SPEECH_ONLY_GROUPS and not speech_metrics_allowed:
+                result.notes.append(
+                    f"{group_name}: skipped (content_type='{result.content_type}', "
+                    "not speech)"
+                )
+                continue
             fn = METRIC_GROUPS[group_name]
             try:
                 with warnings.catch_warnings(record=True) as caught:
@@ -167,6 +255,16 @@ class AudioAnalyzer:
                         result.notes.append(f"{group_name}: {w.message}")
                         if self.verbose:
                             print(f"  [warn] {w.message}")
+                if group_name == "perceptual" and not speech_metrics_allowed:
+                    filtered_metrics = [
+                        m for m in metrics if m.name not in _NON_SPEECH_PERCEPTUAL_METRICS
+                    ]
+                    if len(filtered_metrics) != len(metrics):
+                        result.notes.append(
+                            "perceptual: omitted speech-specific metrics for "
+                            f"content_type='{result.content_type}'"
+                        )
+                    metrics = filtered_metrics
                 result.metrics.extend(metrics)
             except Exception as e:
                 result.metrics.append(MetricResult(
@@ -182,6 +280,12 @@ class AudioAnalyzer:
     def analyze_all(self, paths: list[Path], on_progress=None) -> list[FileResult]:
         """Analyze all paths. on_progress(completed, total, path) called after each file."""
         total = len(paths)
+
+        if self.reference:
+            try:
+                self._load_reference()
+            except Exception:
+                pass
 
         if self.workers == 1 or total == 1:
             results = []

@@ -25,14 +25,16 @@ Three new metric groups: 31 additional metrics.
 
 ---
 
-## v0.3.0 — Speech Quality Metrics
-Wire up the existing `metrics_speech_quality.py` and `speech_detector.py` modules.
+## v0.3.0 — Speech Quality Metrics — Released 2026-03-29
 
 - **Additional jitter measures** — RAP, PPQ5, DDP
 - **Additional shimmer measures** — APQ3, APQ5, DDA
 - **Noise-to-Harmonics Ratio (NHR)** — complement to HNR
-- **Speech detection gate** — automatically skip voice quality metrics on non-speech content (music, silence, noise)
-- **Content-type classification** — tag each file as `speech`, `music`, `noise`, or `silence` in output
+- **Multi-cue speech detector** (`speech_detector.py`) — 7 weighted acoustic cues (F0, ZCR bimodality, syllabic modulation, spectral tilt, voicing continuity, speech-band energy, music discriminator); returns `content_type` and `speech_confidence`
+- **Speech detection gate** — automatically skips prosody, speaker, and speech metric groups for non-speech content
+- **Content-type classification** — each result tagged as `speech`, `music`, `noise`, `silence`, or `mixed`
+- **Output schema versioning** — `schema_version` + `tool_version` emitted in every JSON and CSV output
+- Consolidated `metrics_speech_quality.py` into existing metric modules
 
 ---
 

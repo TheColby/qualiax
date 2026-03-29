@@ -6,6 +6,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from .version import OUTPUT_SCHEMA_VERSION, __version__
+
 
 @dataclass
 class MetricResult:
@@ -44,6 +46,8 @@ class FileResult:
     sample_rate: int = 0
     channels: int = 0
     bit_depth: Optional[int] = None
+    content_type: Optional[str] = None   # "speech" | "music" | "noise" | "silence" | "mixed" | "unknown"
+    speech_confidence: Optional[float] = None
 
     def metrics_by_group(self) -> dict[str, list[MetricResult]]:
         groups: dict[str, list[MetricResult]] = {}
@@ -53,11 +57,15 @@ class FileResult:
 
     def to_dict(self) -> dict:
         return {
+            "schema_version": OUTPUT_SCHEMA_VERSION,
+            "tool_version": __version__,
             "file": self.path,
             "duration_s": self.duration_s,
             "sample_rate": self.sample_rate,
             "channels": self.channels,
             "bit_depth": self.bit_depth,
+            "content_type": self.content_type,
+            "speech_confidence": self.speech_confidence,
             "notes": self.notes,
             "error": self.error,
             "metrics": [

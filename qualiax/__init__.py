@@ -1,5 +1,6 @@
 """qualiax — Perceptual Speech & Audio Quality Analyzer"""
-__version__ = "0.1.0"
+
+from .version import __version__, OUTPUT_SCHEMA_VERSION
 
 from . import gpu
 
