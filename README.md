@@ -29,6 +29,12 @@ To save a JSON sidecar next to the file:
 qualiax sample.wav --save-sidecar
 ```
 
+To generate a small set of demo outputs end-to-end:
+
+```bash
+./demo.sh
+```
+
 ---
 
 ## Table of Contents
@@ -148,6 +154,7 @@ Common variants:
 
 ```bash
 ./install.sh                  # default: local .venv + .[all]
+./install.sh --demo           # install, verify, and run the demo script
 ./install.sh --minimal        # base package only
 ./install.sh --audio --watch  # choose specific extras from pyproject.toml
 ./install.sh --with-torch     # also install torch + torchaudio
@@ -156,6 +163,14 @@ Common variants:
 ```
 
 The script detects `ffmpeg` and tells you how to install it if needed, but it does not modify your system package manager for you.
+
+After install, the friendliest first-run path is:
+
+```bash
+qualiax --help
+qualiax sample.wav
+./demo.sh
+```
 
 ### Optional Dependencies
 
@@ -209,6 +224,13 @@ Analyze a single file. Results are printed to the terminal:
 
 ```bash
 qualiax recording.wav
+qualiax sample.wav
+```
+
+Generate a small console + JSON + Markdown + HTML walkthrough with the bundled sample:
+
+```bash
+./demo.sh
 ```
 
 ### Directories
