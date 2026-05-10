@@ -11,7 +11,7 @@ from typing import Optional
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy.signal import find_peaks
+from scipy.signal import find_peaks, resample_poly
 
 from .models import MetricResult
 
@@ -27,15 +27,54 @@ def _frame_signal(audio: NDArray, frame_len: int, hop_len: int) -> NDArray:
     return audio[idx]
 
 
-def compute_f0_track(
+def _compute_crepe_f0_track(
+    audio: NDArray,
+    sr: int,
+    f0_min: float,
+    f0_max: float,
+    voiced_thresh: float,
+) -> Optional[tuple[NDArray, NDArray]]:
+    """Try optional CREPE neural pitch tracking before falling back."""
+    try:
+        import crepe
+    except ImportError:
+        return None
+    try:
+        target_sr = 16000
+        work = resample_poly(audio, target_sr, sr) if sr != target_sr else audio
+        work = np.asarray(work, dtype=np.float32)
+        if len(work) < int(0.05 * target_sr):
+            return None
+        times, freq, conf, _ = crepe.predict(
+            work,
+            target_sr,
+            viterbi=True,
+            step_size=10,
+            model_capacity="tiny",
+            center=True,
+            verbose=0,
+        )
+        freq = np.asarray(freq, dtype=np.float64).reshape(-1)
+        conf = np.asarray(conf, dtype=np.float64).reshape(-1)
+        valid = (conf >= voiced_thresh) & (freq >= f0_min) & (freq <= f0_max)
+        f0 = np.where(valid, freq, 0.0)
+        strength = np.where(valid, conf, 0.0)
+        return f0, strength
+    except Exception as e:
+        warnings.warn(f"CREPE F0 failed: {e}; falling back to autocorrelation")
+        return None
+
+
+def compute_f0_track_with_backend(
     audio: NDArray,
     sr: int,
     f0_min: float = 60.0,
     f0_max: float = 500.0,
     voiced_thresh: float = 0.40,
-) -> tuple[NDArray, NDArray]:
+) -> tuple[NDArray, NDArray, str]:
     """
-    Per-frame F0 and voicing strength via normalized autocorrelation.
+    Per-frame F0 and voicing strength via CREPE when available, otherwise
+    normalized autocorrelation.
 
     Returns
     -------
@@ -43,14 +82,21 @@ def compute_f0_track(
         F0 in Hz for each frame; 0.0 for unvoiced frames.
     strength_arr : ndarray, shape (n_frames,)
         Normalized autocorrelation peak height (0–1).
+    backend : str
+        Pitch estimator backend used for the track.
     """
+    crepe_result = _compute_crepe_f0_track(audio, sr, f0_min, f0_max, voiced_thresh)
+    if crepe_result is not None:
+        f0_arr, strength_arr = crepe_result
+        return f0_arr, strength_arr, "crepe"
+
     frame_len = int(0.025 * sr)
     hop_len   = int(0.010 * sr)
     tau_min   = max(1, int(sr / f0_max))
     tau_max   = int(sr / f0_min)
 
     if len(audio) < frame_len:
-        return np.array([]), np.array([])
+        return np.array([]), np.array([]), "autocorrelation"
 
     frames = _frame_signal(audio, frame_len, hop_len)
     win    = np.hanning(frame_len)
@@ -84,7 +130,24 @@ def compute_f0_track(
         str_out[i] = strength
         f0_out[i]  = sr / (tau_min + best)
 
-    return f0_out, str_out
+    return f0_out, str_out, "autocorrelation"
+
+
+def compute_f0_track(
+    audio: NDArray,
+    sr: int,
+    f0_min: float = 60.0,
+    f0_max: float = 500.0,
+    voiced_thresh: float = 0.40,
+) -> tuple[NDArray, NDArray]:
+    f0_arr, strength_arr, _ = compute_f0_track_with_backend(
+        audio,
+        sr,
+        f0_min=f0_min,
+        f0_max=f0_max,
+        voiced_thresh=voiced_thresh,
+    )
+    return f0_arr, strength_arr
 
 
 # ─── Jitter & Shimmer ─────────────────────────────────────────────────────────
@@ -324,7 +387,7 @@ def compute_prosody(
             return a.mean(axis=0) if a.ndim == 2 else a
 
     mono   = audio.mean(axis=0) if audio.ndim == 2 else audio
-    f0_arr, strength_arr = compute_f0_track(mono, sr)
+    f0_arr, strength_arr, f0_backend = compute_f0_track_with_backend(mono, sr)
 
     if len(f0_arr) == 0:
         return []
@@ -343,6 +406,11 @@ def compute_prosody(
         "Voiced Frame Ratio", round(voiced_ratio * 100, 2), "%",
         "Fraction of frames detected as voiced speech", "prosody",
         higher_is_better=None,
+    ))
+    results.append(MetricResult(
+        "F0 Estimator Backend", f0_backend, "",
+        "Pitch tracker backend used for this file (`crepe` when available, otherwise autocorrelation).",
+        "prosody",
     ))
 
     if n_voiced < 4:

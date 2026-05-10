@@ -1,109 +1,228 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+VENV_DIR="${VENV_DIR:-$SCRIPT_DIR/.venv}"
+USE_GLOBAL=0
+INSTALL_TORCH=0
+INSTALL_CREPE=0
+EXTRAS=("all")
+
+usage() {
+    cat <<'EOF'
+qualiax installer
+
+Usage:
+  ./install.sh [options]
+
+Options:
+  --minimal           Install only the base package (no extras).
+  --audio             Install the `audio` extra.
+  --perceptual        Install the `perceptual` extra.
+  --live              Install the `live` extra.
+  --watch             Install the `watch` extra.
+  --ml                Install the `ml` extra.
+  --all               Install the `all` extra (default).
+  --with-torch        Also install `torch` and `torchaudio`.
+  --with-crepe        Also install `crepe` manually for the neural F0 backend.
+  --global            Install into the current Python environment instead of a venv.
+  --venv PATH         Virtualenv path to create/use (default: ./.venv).
+  --python PATH       Python executable to use (default: python3).
+  --help              Show this help.
+
+Examples:
+  ./install.sh
+  ./install.sh --audio --perceptual
+  ./install.sh --minimal --with-torch
+  ./install.sh --all --with-torch --with-crepe
+EOF
+}
+
+set_extras() {
+    EXTRAS=("$@")
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --minimal)
+            set_extras
+            ;;
+        --audio)
+            if [[ "${EXTRAS[*]}" == "all" ]]; then
+                set_extras audio
+            else
+                EXTRAS+=("audio")
+            fi
+            ;;
+        --perceptual)
+            if [[ "${EXTRAS[*]}" == "all" ]]; then
+                set_extras perceptual
+            else
+                EXTRAS+=("perceptual")
+            fi
+            ;;
+        --live)
+            if [[ "${EXTRAS[*]}" == "all" ]]; then
+                set_extras live
+            else
+                EXTRAS+=("live")
+            fi
+            ;;
+        --watch)
+            if [[ "${EXTRAS[*]}" == "all" ]]; then
+                set_extras watch
+            else
+                EXTRAS+=("watch")
+            fi
+            ;;
+        --ml)
+            if [[ "${EXTRAS[*]}" == "all" ]]; then
+                set_extras ml
+            else
+                EXTRAS+=("ml")
+            fi
+            ;;
+        --all)
+            set_extras all
+            ;;
+        --with-torch)
+            INSTALL_TORCH=1
+            ;;
+        --with-crepe)
+            INSTALL_CREPE=1
+            ;;
+        --global)
+            USE_GLOBAL=1
+            ;;
+        --venv)
+            shift
+            VENV_DIR="${1:?missing value for --venv}"
+            ;;
+        --python)
+            shift
+            PYTHON_BIN="${1:?missing value for --python}"
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+    shift
+done
+
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+    echo "Python executable not found: $PYTHON_BIN" >&2
+    exit 1
+fi
+
+if [[ ${#EXTRAS[@]} -gt 1 ]]; then
+    declare -A SEEN=()
+    UNIQUE_EXTRAS=()
+    for extra in "${EXTRAS[@]}"; do
+        if [[ -z "${SEEN[$extra]:-}" ]]; then
+            SEEN[$extra]=1
+            UNIQUE_EXTRAS+=("$extra")
+        fi
+    done
+    EXTRAS=("${UNIQUE_EXTRAS[@]}")
+fi
+
+PACKAGE_ARGS=(-e "$SCRIPT_DIR")
+if [[ ${#EXTRAS[@]} -gt 0 ]]; then
+    IFS=,
+    PACKAGE_ARGS=(-e "$SCRIPT_DIR[${EXTRAS[*]}]")
+    unset IFS
+fi
 
 echo "=================================================="
 echo "  qualiax installer"
 echo "=================================================="
 echo ""
+echo "Python: $PYTHON_BIN"
 
-# ── System: ffmpeg ────────────────────────────────────────────────────────────
-echo "[1/4] Checking ffmpeg (required for MP3 / AAC / M4A / Opus)..."
-if ! command -v ffmpeg &>/dev/null; then
-    echo "  ffmpeg not found — installing..."
-    if command -v brew &>/dev/null; then
-        brew install ffmpeg
-    elif command -v apt-get &>/dev/null; then
-        sudo apt-get update -qq && sudo apt-get install -y ffmpeg
-    elif command -v dnf &>/dev/null; then
-        sudo dnf install -y ffmpeg
-    elif command -v pacman &>/dev/null; then
-        sudo pacman -S --noconfirm ffmpeg
+if command -v ffmpeg >/dev/null 2>&1; then
+    echo "ffmpeg: $(ffmpeg -version 2>&1 | head -1)"
+else
+    echo "ffmpeg: not found"
+    echo "  Install manually if you need MP3/AAC/video-container decoding."
+    echo "  macOS:  brew install ffmpeg"
+    echo "  Debian: sudo apt install ffmpeg"
+fi
+
+if [[ $USE_GLOBAL -eq 1 ]]; then
+    PYTHON_EXE="$PYTHON_BIN"
+    echo "Target: current Python environment"
+else
+    if [[ -n "${VIRTUAL_ENV:-}" ]]; then
+        PYTHON_EXE="$VIRTUAL_ENV/bin/python"
+        echo "Target: active virtualenv at $VIRTUAL_ENV"
     else
-        echo "  !! Could not install ffmpeg automatically."
-        echo "     Install it manually: https://ffmpeg.org/download.html"
+        if [[ ! -d "$VENV_DIR" ]]; then
+            echo "Creating virtualenv at $VENV_DIR"
+            "$PYTHON_BIN" -m venv "$VENV_DIR"
+        fi
+        PYTHON_EXE="$VENV_DIR/bin/python"
+        echo "Target: virtualenv at $VENV_DIR"
     fi
-else
-    echo "  OK: $(ffmpeg -version 2>&1 | head -1)"
 fi
 
-# ── Python packages: core + all extras ───────────────────────────────────────
 echo ""
-echo "[2/4] Installing qualiax + all Python dependencies..."
-pip install --upgrade pip setuptools wheel
+echo "Installing qualiax from pyproject extras..."
+"$PYTHON_EXE" -m pip install --upgrade pip setuptools wheel
+"$PYTHON_EXE" -m pip install "${PACKAGE_ARGS[@]}"
 
-# Explicit installs so every dep is visible in the output, even if already present
-pip install \
-    "click>=8.0" \
-    "numpy>=1.23" \
-    "scipy>=1.9" \
-    "soundfile>=0.12" \
-    "pydub>=0.25" \
-    "pesq>=0.0.4" \
-    "pystoi>=0.3" \
-    "librosa>=0.10"
-
-# Install qualiax itself in editable mode (picks up any remaining transitive deps)
-pip install -e "$SCRIPT_DIR/[all]"
-
-# ── PyTorch (GPU acceleration) ────────────────────────────────────────────────
-echo ""
-echo "[3/4] Checking PyTorch (optional — enables CUDA / Apple MPS acceleration)..."
-if python -c "import torch" 2>/dev/null; then
-    TORCH_VER=$(python -c "import torch; print(torch.__version__)")
-    DEVICE="CPU"
-    if python -c "import torch; assert torch.cuda.is_available()" 2>/dev/null; then
-        DEVICE="CUDA ($(python -c "import torch; print(torch.cuda.get_device_name(0))"))"
-    elif python -c "import torch; assert torch.backends.mps.is_available()" 2>/dev/null; then
-        DEVICE="MPS (Apple Silicon)"
-    fi
-    echo "  OK: PyTorch $TORCH_VER — active device: $DEVICE"
-else
-    echo "  PyTorch not found. Installing CPU build..."
-    echo "  (For CUDA or MPS, install manually — see: https://pytorch.org/get-started)"
-    pip install torch --index-url https://download.pytorch.org/whl/cpu
+if [[ $INSTALL_TORCH -eq 1 ]]; then
+    echo ""
+    echo "Installing PyTorch support..."
+    "$PYTHON_EXE" -m pip install torch torchaudio
 fi
 
-# ── Verify ────────────────────────────────────────────────────────────────────
-echo ""
-echo "[4/4] Verifying installation..."
-python -c "
-import importlib, sys
+if [[ $INSTALL_CREPE -eq 1 ]]; then
+    echo ""
+    echo "Installing CREPE (manual opt-in backend)..."
+    "$PYTHON_EXE" -m pip install crepe
+fi
 
-ok  = []
-err = []
-deps = [
-    ('click',     'click'),
-    ('numpy',     'numpy'),
-    ('scipy',     'scipy'),
-    ('soundfile', 'soundfile'),
-    ('pydub',     'pydub'),
-    ('pesq',      'pesq'),
-    ('pystoi',    'pystoi'),
-    ('librosa',   'librosa'),
-    ('torch',     'torch (GPU acceleration)'),
+echo ""
+echo "Verifying installation..."
+"$PYTHON_EXE" - <<'PY'
+import importlib
+import sys
+
+mods = [
+    ("qualiax", "qualiax"),
+    ("click", "click"),
+    ("numpy", "numpy"),
+    ("scipy", "scipy"),
 ]
-for mod, label in deps:
+
+failed = []
+for mod, label in mods:
     try:
         m = importlib.import_module(mod)
-        ver = getattr(m, '__version__', '?')
-        ok.append(f'  ✓  {label} {ver}')
-    except ImportError:
-        err.append(f'  ✗  {label}')
+        version = getattr(m, "__version__", "?")
+        print(f"  ok  {label} {version}")
+    except Exception as exc:
+        failed.append((label, exc))
 
-print('  Installed:')
-for line in ok:  print(line)
-if err:
-    print()
-    print('  Not installed (optional):')
-    for line in err: print(line)
-"
+if failed:
+    print("")
+    for label, exc in failed:
+        print(f"  fail {label}: {exc}")
+    sys.exit(1)
+PY
 
 echo ""
-echo "=================================================="
-echo "  Installation complete."
-echo ""
-echo "  Run:  qualiax --help"
-echo "  Try:  qualiax sample.wav"
-echo "=================================================="
+echo "Installation complete."
+if [[ $USE_GLOBAL -eq 0 && -z "${VIRTUAL_ENV:-}" ]]; then
+    echo "Activate the environment with:"
+    echo "  source \"$VENV_DIR/bin/activate\""
+fi
+echo "Try:"
+echo "  qualiax --help"

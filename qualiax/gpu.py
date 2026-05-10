@@ -191,16 +191,18 @@ def _stft_torch(mono, sr, n_fft, hop_length, window_name):
     x = _ctx.tensor(mono.astype(np.float32))
 
     # torch.stft → (freq, time, 2) complex output
-    stft_out = torch.stft(
-        x,
-        n_fft=n_fft,
-        hop_length=hop_length,
-        win_length=n_fft,
-        window=win,
-        return_complex=True,
-        pad_mode="reflect",
-        center=True,
-    )  # shape: (n_fft//2+1, T)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*resized.*", category=UserWarning)
+        stft_out = torch.stft(
+            x,
+            n_fft=n_fft,
+            hop_length=hop_length,
+            win_length=n_fft,
+            window=win,
+            return_complex=True,
+            pad_mode="reflect",
+            center=True,
+        )  # shape: (n_fft//2+1, T)
 
     mag = stft_out.abs()
     freqs = torch.fft.rfftfreq(n_fft, d=1.0 / sr).to(_ctx.device)
@@ -413,11 +415,13 @@ def _mfcc_torch(mono, sr, n_mfcc, n_mels, n_fft, fmin, fmax):
     hop_length = n_fft // 2
     win = torch.hann_window(n_fft, device=_ctx.device)
     x = _ctx.tensor(mono.astype(np.float32))
-    stft_out = torch.stft(
-        x, n_fft=n_fft, hop_length=hop_length,
-        win_length=n_fft, window=win,
-        return_complex=True, pad_mode="reflect", center=False,
-    )
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*resized.*", category=UserWarning)
+        stft_out = torch.stft(
+            x, n_fft=n_fft, hop_length=hop_length,
+            win_length=n_fft, window=win,
+            return_complex=True, pad_mode="reflect", center=False,
+        )
     power = stft_out.abs() ** 2  # (n_fft//2+1, T)
 
     # --- Mel filterbank (computed on device) ---
@@ -501,13 +505,27 @@ def _mfcc_numpy(mono, sr, n_mfcc, n_mels, n_fft, fmin, fmax):
 # Accelerated K-weighting filter (BS.1770)
 # ─────────────────────────────────────────────────────────────────────────────
 
+_torchaudio_available: Optional[bool] = None
+
+
+def _check_torchaudio() -> bool:
+    global _torchaudio_available
+    if _torchaudio_available is None:
+        try:
+            import torchaudio.functional  # noqa: F401
+            _torchaudio_available = True
+        except ImportError:
+            _torchaudio_available = False
+    return _torchaudio_available
+
+
 def k_weighting_filter(mono: NDArray, sr: int) -> NDArray:
     """
     Apply BS.1770 K-weighting (two cascaded IIR stages).
     Uses torchaudio functional biquad on GPU when available.
     Falls back to scipy.signal.lfilter.
     """
-    if _ctx.available():
+    if _ctx.available() and _check_torchaudio():
         try:
             return _k_weight_torch(mono, sr)
         except Exception as e:
@@ -517,13 +535,8 @@ def k_weighting_filter(mono: NDArray, sr: int) -> NDArray:
 
 
 def _k_weight_torch(mono, sr):
+    import torchaudio.functional as AF
     torch = _ctx.torch
-    # Check torchaudio availability
-    try:
-        import torchaudio.functional as AF
-        have_ta = True
-    except ImportError:
-        have_ta = False
 
     x = _ctx.tensor(mono.astype(np.float64)).float()
 
@@ -552,15 +565,8 @@ def _k_weight_torch(mono, sr):
     a1_2 = 2 * (K2 * K2 - 1) / a0_2
     a2_2 = (1 - K2 / Q_2 + K2 * K2) / a0_2
 
-    if have_ta:
-        # torchaudio.functional.biquad runs on any torch device
-        s1 = AF.biquad(x, b0_1, b1_1, b2_1, 1.0, a1_1, a2_1)
-        s2 = AF.biquad(s1, b0_2, b1_2, b2_2, 1.0, a1_2, a2_2)
-    else:
-        # Manual biquad via time-domain loop (works but slow)
-        # Fall back to scipy for actual filtering
-        raise RuntimeError("torchaudio not available")
-
+    s1 = AF.biquad(x, b0_1, b1_1, b2_1, 1.0, a1_1, a2_1)
+    s2 = AF.biquad(s1, b0_2, b1_2, b2_2, 1.0, a1_2, a2_2)
     return _ctx.numpy(s2).astype(np.float64)
 
 
@@ -622,11 +628,13 @@ def _spectral_features_torch(mono, sr, n_fft):
     win = torch.hann_window(n_fft, device=_ctx.device)
     x = _ctx.tensor(mono.astype(np.float32))
 
-    stft_out = torch.stft(
-        x, n_fft=n_fft, hop_length=hop,
-        win_length=n_fft, window=win,
-        return_complex=True, center=True, pad_mode="reflect",
-    )
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*resized.*", category=UserWarning)
+        stft_out = torch.stft(
+            x, n_fft=n_fft, hop_length=hop,
+            win_length=n_fft, window=win,
+            return_complex=True, center=True, pad_mode="reflect",
+        )
     mag = stft_out.abs()       # (F, T)
     power = mag ** 2            # (F, T)
     n_freqs = n_fft // 2 + 1

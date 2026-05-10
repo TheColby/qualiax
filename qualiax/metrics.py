@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import math
 import warnings
-from typing import Optional
+from pathlib import Path
+from typing import Callable, Optional
 
 import numpy as np
 from numpy.typing import NDArray
@@ -30,6 +31,21 @@ def _safe(fn, *args, name="", **kwargs):
     except Exception as e:
         warnings.warn(f"Metric '{name}' failed: {e}")
         return None
+
+
+def _warn_metric_failure(name: str, exc: Exception) -> None:
+    warnings.warn(f"Metric '{name}' failed: {exc}")
+
+
+def _with_trust(
+    metric: MetricResult,
+    *,
+    confidence: str,
+    calibration_note: str | None = None,
+) -> MetricResult:
+    metric.confidence = confidence
+    metric.calibration_note = calibration_note
+    return metric
 
 
 def _db(x: float) -> float:
@@ -77,7 +93,7 @@ def compute_basic(audio: NDArray, sr: int, ref_audio=None, ref_sr=None) -> list[
     dc_offset = float(np.mean(mono))
     silence_ratio = float(np.mean(np.abs(mono) < 0.001))
 
-    return [
+    results = [
         MetricResult("Duration", duration, "s", "Total duration of the audio file", "basic"),
         MetricResult("Sample Rate", sr, "Hz", "Audio sample rate", "basic"),
         MetricResult("Channels", n_channels, "", "Number of audio channels", "basic"),
@@ -110,6 +126,91 @@ def compute_basic(audio: NDArray, sr: int, ref_audio=None, ref_sr=None) -> list[
         MetricResult("Zero Crossing Rate", float(np.mean(np.abs(np.diff(np.sign(mono))) > 0)), "crossings/sample",
                      "Rate of sign changes (correlated with pitch/noisiness)", "basic"),
     ]
+
+    if audio.ndim == 2 and audio.shape[0] >= 2:
+        results.extend(_multi_channel_metrics(audio, sr))
+
+    return results
+
+
+def _multi_channel_metrics(audio: NDArray, sr: int) -> list[MetricResult]:
+    """Stereo and inter-channel metrics for multi-channel content."""
+    results: list[MetricResult] = []
+    channel_count = audio.shape[0]
+    for idx in range(channel_count):
+        rms_db = _db(_rms(audio[idx]))
+        peak_db = _db(float(np.max(np.abs(audio[idx]))))
+        results.append(MetricResult(
+            f"Channel {idx + 1} RMS Level", rms_db, "dBFS",
+            f"Per-channel RMS level for channel {idx + 1}", "basic",
+        ))
+        results.append(MetricResult(
+            f"Channel {idx + 1} Peak Level", peak_db, "dBFS",
+            f"Per-channel peak level for channel {idx + 1}", "basic",
+        ))
+
+    left = audio[0] - float(np.mean(audio[0]))
+    right = audio[1] - float(np.mean(audio[1]))
+    left_rms = _rms(left)
+    right_rms = _rms(right)
+    if left_rms > 0 and right_rms > 0:
+        ild = 20 * math.log10((left_rms + _eps()) / (right_rms + _eps()))
+    else:
+        ild = 0.0
+
+    if np.std(left) > 0 and np.std(right) > 0:
+        phase_corr = float(np.corrcoef(left, right)[0, 1])
+    else:
+        phase_corr = 1.0
+    mid = (left + right) * 0.5
+    side = (left - right) * 0.5
+    stereo_width = float(np.clip(_rms(side) / (_rms(mid) + _rms(side) + _eps()), 0.0, 1.0))
+
+    max_lag = max(1, int(0.0015 * sr))
+    lags = range(-max_lag, max_lag + 1)
+    corr_values = []
+    for lag in lags:
+        if lag >= 0:
+            a = left[lag:]
+            b = right[: len(left) - lag]
+        else:
+            a = left[: len(left) + lag]
+            b = right[-lag:]
+        corr_values.append(float(np.dot(a, b)))
+    lag = int(np.argmax(corr_values) - max_lag)
+    itd_ms = lag / sr * 1000.0
+
+    results.extend(
+        [
+            MetricResult(
+                "Stereo Phase Correlation", phase_corr, "",
+                "Correlation between left and right channels (-1 = inverted, +1 = mono-compatible).",
+                "basic",
+                reference_range=(-0.2, 1.0),
+                warning="Negative phase correlation may collapse in mono" if phase_corr < 0 else None,
+            ),
+            MetricResult(
+                "Stereo Width", stereo_width, "",
+                "Side-to-mid energy ratio mapped to 0–1. Higher values indicate a wider stereo image.",
+                "basic",
+                reference_range=(0.1, 0.8),
+            ),
+            MetricResult(
+                "Interaural Level Difference (ILD)", ild, "dB",
+                "Level difference between the first two channels.",
+                "basic",
+                higher_is_better=False,
+                warning="Large left/right level imbalance" if abs(ild) > 6.0 else None,
+            ),
+            MetricResult(
+                "Interaural Time Difference (ITD)", itd_ms, "ms",
+                "Peak cross-correlation lag between the first two channels.",
+                "basic",
+                higher_is_better=False,
+            ),
+        ]
+    )
+    return results
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -218,7 +319,8 @@ def compute_loudness(audio: NDArray, sr: int, ref_audio=None, ref_sr=None) -> li
     # True peak (oversample 4x via upsampling) — GPU-accelerated
     try:
         true_peak_dbtp = _gpu.true_peak(mono, sr, oversample=4)
-    except Exception:
+    except Exception as e:
+        _warn_metric_failure("True Peak", e)
         true_peak_dbtp = _db(float(np.max(np.abs(mono))))
 
     results = [
@@ -237,6 +339,49 @@ def compute_loudness(audio: NDArray, sr: int, ref_audio=None, ref_sr=None) -> li
                      higher_is_better=False,
                      warning="Exceeds -1 dBTP streaming limit" if true_peak_dbtp and true_peak_dbtp > -1 else None),
     ]
+
+    # ── Streaming loudness target advisor ────────────────────────────────────
+    results.extend(_loudness_targets(lufs))
+
+    return results
+
+
+# Platform loudness targets (integrated LUFS, tolerance in LU)
+_LOUDNESS_TARGETS: list[tuple[str, float, float]] = [
+    ("Spotify",          -14.0, 1.0),
+    ("Apple Music",      -16.0, 1.0),
+    ("YouTube",          -14.0, 2.0),
+    ("Amazon Music",     -14.0, 1.0),
+    ("Tidal",            -14.0, 1.0),
+    ("Podcast (AES)",    -16.0, 1.0),
+    ("EBU R128",         -23.0, 1.0),
+    ("ATSC A/85",        -24.0, 2.0),
+]
+
+
+def _loudness_targets(lufs: Optional[float]) -> list[MetricResult]:
+    """Report delta from each platform's integrated loudness target."""
+    results = []
+    for platform, target, tol in _LOUDNESS_TARGETS:
+        if lufs is None:
+            results.append(MetricResult(
+                f"Loudness Delta vs {platform}", None, "LU",
+                f"Target: {target} LUFS ±{tol} LU — requires valid LUFS reading",
+                "loudness",
+            ))
+            continue
+        delta = round(lufs - target, 2)
+        in_range = abs(delta) <= tol
+        results.append(MetricResult(
+            f"Loudness Delta vs {platform}", delta, "LU",
+            f"Target: {target} LUFS ±{tol} LU. Positive = too loud, negative = too quiet.",
+            "loudness",
+            higher_is_better=None,
+            reference_range=(-tol, tol),
+            warning=None if in_range else (
+                f"{abs(delta):.1f} LU {'above' if delta > 0 else 'below'} {platform} target"
+            ),
+        ))
     return results
 
 
@@ -366,37 +511,17 @@ def compute_spectral(audio: NDArray, sr: int, ref_audio=None, ref_sr=None) -> li
 
 
 def _estimate_f0(mono: NDArray, sr: int, fmin=60, fmax=600) -> Optional[float]:
-    """Simple autocorrelation-based F0 estimate (mean over frames)."""
+    """Pitch estimate via CREPE when available, otherwise autocorrelation."""
     try:
-        frame_len = int(0.04 * sr)  # 40ms frames
-        hop = int(0.01 * sr)
-        min_lag = int(sr / fmax)
-        max_lag = int(sr / fmin)
+        from .metrics_prosody import compute_f0_track_with_backend
 
-        pitches = []
-        for start in range(0, len(mono) - frame_len, hop):
-            frame = mono[start:start + frame_len]
-            frame -= frame.mean()
-            if np.max(np.abs(frame)) < 0.01:
-                continue
-            # Autocorrelation via FFT
-            n = 2 * frame_len
-            fft = np.fft.rfft(frame, n=n)
-            acf = np.fft.irfft(fft * np.conj(fft))
-            acf = acf[:frame_len]
-            if max_lag >= len(acf):
-                continue
-            region = acf[min_lag:max_lag]
-            if len(region) == 0:
-                continue
-            lag = np.argmax(region) + min_lag
-            if acf[0] > 0 and acf[lag] / acf[0] > 0.3:
-                pitches.append(sr / lag)
-
-        if pitches:
+        f0_arr, _, _ = compute_f0_track_with_backend(mono, sr, f0_min=fmin, f0_max=fmax, voiced_thresh=0.30)
+        pitches = f0_arr[f0_arr > 0]
+        if len(pitches) > 0:
             return float(np.median(pitches))
         return None
-    except Exception:
+    except Exception as e:
+        _warn_metric_failure("Estimated Fundamental (F0)", e)
         return None
 
 
@@ -585,7 +710,8 @@ def _compute_hnr(mono: NDArray, sr: int, fmin=75, fmax=500) -> Optional[float]:
             if r_max > 0.0:
                 hnrs.append(10 * math.log10(r_max / (1.0 - r_max + _eps())))
         return float(np.median(hnrs)) if hnrs else None
-    except Exception:
+    except Exception as e:
+        _warn_metric_failure("Voiced/Unvoiced Ratio", e)
         return None
 
 
@@ -672,6 +798,16 @@ def compute_speech(audio: NDArray, sr: int, ref_audio=None, ref_sr=None) -> list
             "Rough syllable rate estimated via energy envelope peaks", "speech"
         ))
 
+    asl = _active_speech_level(mono, sr)
+    if asl is not None:
+        results.append(MetricResult(
+            "Active Speech Level (ASL)", asl, "dBFS",
+            "P.56-inspired active speech RMS level over speech-active frames", "speech",
+            warning="Low active speech level" if asl < -30 else (
+                "High active speech level" if asl > -14 else None
+            ),
+        ))
+
     # Pause statistics (already computed in temporal; add speech-specific reading)
     results.append(MetricResult(
         "Speech-Band SNR (300 Hz – 3.4 kHz)", _speech_band_snr(mono, sr), "dB",
@@ -716,7 +852,45 @@ def _compute_mfccs(mono: NDArray, sr: int, n_mfcc=13, n_mels=40, n_fft=512) -> O
         log_mel = np.log(mel_power + _eps())
         mfccs = dct(log_mel, type=2, axis=0, norm="ortho")[:n_mfcc]
         return mfccs
-    except Exception:
+    except Exception as e:
+        _warn_metric_failure("Estimated Speaking Rate", e)
+        return None
+
+
+def _active_speech_level(mono: NDArray, sr: int) -> Optional[float]:
+    """Approximate active speech level (ASL) in dBFS using speech-active frames."""
+    try:
+        frame_len = int(0.030 * sr)
+        hop = int(0.010 * sr)
+        if len(mono) < frame_len:
+            return None
+
+        frame_rms = np.array([
+            float(np.sqrt(np.mean(mono[start:start + frame_len] ** 2)))
+            for start in range(0, len(mono) - frame_len + 1, hop)
+        ])
+        if len(frame_rms) == 0:
+            return None
+
+        frame_db = np.array([_db(v) if v > 0 else -math.inf for v in frame_rms])
+        finite = frame_db[np.isfinite(frame_db)]
+        if len(finite) == 0:
+            return None
+
+        # P.56-inspired activity gate: keep frames above a robust low-percentile floor.
+        threshold_db = max(float(np.percentile(finite, 30)), -50.0)
+        active = frame_db > threshold_db
+        if not np.any(active):
+            return None
+
+        # Apply a short hangover so brief speech dips stay part of the active region.
+        hangover = max(1, int(round(0.20 / (hop / sr))))
+        active = np.convolve(active.astype(np.int32), np.ones(hangover, dtype=np.int32), mode="same") > 0
+
+        active_rms = float(np.sqrt(np.mean(frame_rms[active] ** 2)))
+        return _db(active_rms)
+    except Exception as e:
+        _warn_metric_failure("Active Speech Level (ASL)", e)
         return None
 
 
@@ -735,7 +909,8 @@ def _voiced_unvoiced_ratio(mono: NDArray, sr: int) -> Optional[float]:
                 if zcr < 0.15:  # low ZCR = likely voiced
                     voiced += 1
         return voiced / total if total > 0 else None
-    except Exception:
+    except Exception as e:
+        _warn_metric_failure("Speech-Band SNR", e)
         return None
 
 
@@ -760,7 +935,8 @@ def _estimate_speaking_rate(mono: NDArray, sr: int) -> Optional[float]:
         if duration > 0.5 and len(peaks) > 1:
             return len(peaks) / duration
         return None
-    except Exception:
+    except Exception as e:
+        _warn_metric_failure("SI-SDR", e)
         return None
 
 
@@ -779,7 +955,8 @@ def _speech_band_snr(mono: NDArray, sr: int, flo=300, fhi=3400) -> Optional[floa
         if np_ <= 0:
             return None
         return float(10 * math.log10(sp / np_))
-    except Exception:
+    except Exception as e:
+        _warn_metric_failure("SDR (Signal-to-Distortion Ratio)", e)
         return None
 
 
@@ -787,15 +964,254 @@ def _speech_band_snr(mono: NDArray, sr: int, flo=300, fhi=3400) -> Optional[floa
 # GROUP: perceptual  (intrusive: needs reference; non-intrusive otherwise)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _compute_dnsmos_p835(mono: NDArray, sr: int) -> list[MetricResult]:
+    """
+    Microsoft DNSMOS P.835 — try ONNX runtime first, fall back to proxy.
+
+    Real model: https://github.com/microsoft/DNS-Challenge/tree/master/DNSMOS
+    Install: pip install onnxruntime  (+ download model files)
+
+    Proxy approach when ONNX unavailable:
+    - SIG  (signal quality): voiced HNR + spectral tilt consistency
+    - BAK  (background noise): noise floor stationarity + spectral flatness
+    - OVRL (overall):          weighted combination (SIG×0.46 + BAK×0.23 + 0.31)
+    """
+    # ── Try real ONNX model ──────────────────────────────────────────────────
+    try:
+        import onnxruntime as ort  # noqa: F401
+        # If models are present alongside this module, run them.
+        # Model files must be named dnsmos_sig.onnx, dnsmos_bak.onnx, dnsmos_ovrl.onnx
+        # and placed in the qualiax package directory.
+        model_dir = Path(__file__).parent
+        sig_path  = model_dir / "dnsmos_sig.onnx"
+        bak_path  = model_dir / "dnsmos_bak.onnx"
+        ovrl_path = model_dir / "dnsmos_ovrl.onnx"
+
+        if sig_path.exists() and bak_path.exists() and ovrl_path.exists():
+            # Resample to 16 kHz, truncate / zero-pad to 9600 samples (0.6 s)
+            target_sr = 16000
+            if sr != target_sr:
+                audio_16k = _resample(mono, sr, target_sr)
+            else:
+                audio_16k = mono
+            n = 9600
+            if len(audio_16k) >= n:
+                chunk = audio_16k[:n]
+            else:
+                chunk = np.pad(audio_16k, (0, n - len(audio_16k)))
+            chunk = chunk.astype(np.float32)[None, :]  # (1, 9600)
+
+            def _run(path):
+                sess = ort.InferenceSession(str(path),
+                                            providers=["CPUExecutionProvider"])
+                out = sess.run(None, {sess.get_inputs()[0].name: chunk})
+                return float(out[0][0])
+
+            sig  = _run(sig_path)
+            bak  = _run(bak_path)
+            ovrl = _run(ovrl_path)
+
+            return [
+                _with_trust(
+                    MetricResult("DNSMOS P.835 SIG",  round(sig,  3), "MOS [1–5]",
+                                 "Speech signal quality (P.835 ONNX model)", "perceptual",
+                                 higher_is_better=True, reference_range=(3.5, 5.0)),
+                    confidence="model",
+                    calibration_note="DNSMOS requires matching ONNX model files for reproducible calibration.",
+                ),
+                _with_trust(
+                    MetricResult("DNSMOS P.835 BAK",  round(bak,  3), "MOS [1–5]",
+                                 "Background noise quality (P.835 ONNX model)", "perceptual",
+                                 higher_is_better=True, reference_range=(3.5, 5.0)),
+                    confidence="model",
+                    calibration_note="DNSMOS requires matching ONNX model files for reproducible calibration.",
+                ),
+                _with_trust(
+                    MetricResult("DNSMOS P.835 OVRL", round(ovrl, 3), "MOS [1–5]",
+                                 "Overall quality (P.835 ONNX model)", "perceptual",
+                                 higher_is_better=True, reference_range=(3.5, 5.0)),
+                    confidence="model",
+                    calibration_note="DNSMOS requires matching ONNX model files for reproducible calibration.",
+                ),
+            ]
+    except ImportError:
+        pass
+    except Exception as e:
+        warnings.warn(f"DNSMOS ONNX inference failed: {e}; using proxy")
+
+    # ── Proxy ────────────────────────────────────────────────────────────────
+    try:
+        from scipy.signal import stft as scipy_stft
+
+        if sr != 16000:
+            m16 = _resample(mono, sr, 16000)
+            sr16 = 16000
+        else:
+            m16, sr16 = mono, sr
+
+        f, _, Zxx = scipy_stft(m16, fs=sr16, nperseg=512, noverlap=384)
+        mag   = np.abs(Zxx)
+        power = mag ** 2
+
+        # ── SIG proxy: spectral SNR + harmonic structure ─────────────────────
+        frame_p    = power.mean(axis=0)
+        noise_floor = np.percentile(frame_p, 10)
+        sig_p      = np.percentile(frame_p, 90)
+        snr_db     = 10 * math.log10(sig_p / (noise_floor + _eps())) if noise_floor > 0 else 0.0
+
+        # Spectral tilt consistency: speech-like tilt ≈ −6 dB/oct
+        mean_p = power.mean(axis=1) + _eps()
+        valid  = (f > 100) & (f < sr16 / 2.5)
+        if valid.sum() > 5:
+            slope = float(np.polyfit(np.log10(f[valid] + _eps()),
+                                     np.log10(mean_p[valid]), 1)[0])
+            tilt_score = float(np.clip(1.0 - abs(slope + 1.2) / 2.5, 0.0, 1.0))
+        else:
+            tilt_score = 0.5
+
+        sig_score = float(np.clip(1.5 + snr_db / 12.0 * 2.5 + tilt_score * 0.5, 1.0, 5.0))
+
+        # ── BAK proxy: noise stationarity + high spectral flatness indicates noise ──
+        # Stationarity: low frame-to-frame variance of spectral shape = stable bg
+        spectral_var = float(np.mean(np.std(mag, axis=1)))
+        geo  = float(np.exp(np.mean(np.log(mean_p))))
+        arith = float(np.mean(mean_p)) + _eps()
+        flatness = geo / arith  # high flatness = noise-like
+
+        # Lower flatness → cleaner background (less noise bleed)
+        bak_score = float(np.clip(4.5 - flatness * 10 - spectral_var * 5, 1.0, 5.0))
+
+        # ── OVRL proxy: P.835-inspired combination ────────────────────────────
+        ovrl_score = float(np.clip(sig_score * 0.46 + bak_score * 0.23 + 0.31 * 3.0,
+                                   1.0, 5.0))
+
+        proxy_warn = "Proxy (install `onnxruntime` + DNSMOS models for accurate scores)"
+        return [
+            _with_trust(
+                MetricResult("DNSMOS P.835 SIG (proxy)",  round(sig_score,  2), "MOS [1–5]",
+                             "Signal quality proxy (SNR + spectral tilt). " + proxy_warn,
+                             "perceptual", higher_is_better=True, reference_range=(3.5, 5.0),
+                             warning=proxy_warn),
+                confidence="proxy",
+                calibration_note="Proxy DNSMOS values are directional estimates, not drop-in replacements for the official model.",
+            ),
+            _with_trust(
+                MetricResult("DNSMOS P.835 BAK (proxy)",  round(bak_score,  2), "MOS [1–5]",
+                             "Background quality proxy (noise stationarity). " + proxy_warn,
+                             "perceptual", higher_is_better=True, reference_range=(3.5, 5.0),
+                             warning=proxy_warn),
+                confidence="proxy",
+                calibration_note="Proxy DNSMOS values are directional estimates, not drop-in replacements for the official model.",
+            ),
+            _with_trust(
+                MetricResult("DNSMOS P.835 OVRL (proxy)", round(ovrl_score, 2), "MOS [1–5]",
+                             "Overall quality proxy. " + proxy_warn,
+                             "perceptual", higher_is_better=True, reference_range=(3.5, 5.0),
+                             warning=proxy_warn),
+                confidence="proxy",
+                calibration_note="Proxy DNSMOS values are directional estimates, not drop-in replacements for the official model.",
+            ),
+        ]
+    except Exception as e:
+        warnings.warn(f"DNSMOS proxy failed: {e}")
+        return [MetricResult("DNSMOS P.835", None, "", f"Failed: {e}", "perceptual")]
+
+
+def _compute_aecmos(mono: NDArray, sr: int) -> MetricResult:
+    """
+    Echo-aware quality score (AECMOS-inspired).
+
+    Tries ONNX model first; falls back to a signal-domain echo proxy:
+    - Estimate echo tail via autocorrelation at 20–300 ms lags
+    - Estimate early reflection energy vs direct sound energy
+    - Map to MOS-like [1–5] score
+    """
+    try:
+        import onnxruntime as ort  # noqa: F401
+        model_path = Path(__file__).parent / "aecmos.onnx"
+        if model_path.exists():
+            target_sr = 16000
+            if sr != target_sr:
+                m16 = _resample(mono, sr, target_sr)
+            else:
+                m16 = mono
+            n = 9600
+            chunk = m16[:n] if len(m16) >= n else np.pad(m16, (0, n - len(m16)))
+            sess = ort.InferenceSession(str(model_path),
+                                        providers=["CPUExecutionProvider"])
+            score = float(sess.run(None, {
+                sess.get_inputs()[0].name: chunk.astype(np.float32)[None, :]
+            })[0][0])
+            return _with_trust(
+                MetricResult("AECMOS", round(score, 3), "MOS [1–5]",
+                            "Echo-aware quality score (ONNX model)", "perceptual",
+                            higher_is_better=True, reference_range=(3.5, 5.0)),
+                confidence="model",
+                calibration_note="AECMOS requires the matching ONNX model file for calibrated scores.",
+            )
+    except ImportError:
+        pass
+    except Exception as e:
+        warnings.warn(f"AECMOS ONNX failed: {e}; using proxy")
+
+    # ── Echo proxy ───────────────────────────────────────────────────────────
+    try:
+        # Normalized autocorrelation: echo appears as peaks at 20–300 ms lags
+        lag_min = int(0.020 * sr)  # 20 ms
+        lag_max = min(int(0.300 * sr), len(mono) // 2)
+
+        norm_mono = mono - mono.mean()
+        energy    = float(np.dot(norm_mono, norm_mono)) + _eps()
+        if lag_max <= lag_min:
+            raise ValueError("Signal too short for AECMOS proxy")
+
+        # Check a few lag windows
+        n_fft_acf = 2 * len(norm_mono)
+        fft_m = np.fft.rfft(norm_mono, n=n_fft_acf)
+        acf   = np.fft.irfft(fft_m * np.conj(fft_m))[:len(norm_mono)]
+        acf  /= (acf[0] + _eps())
+
+        echo_strength = float(np.max(np.abs(acf[lag_min:lag_max])))
+
+        # Low echo_strength → no echo → high score
+        # echo_strength > 0.3 → noticeable echo
+        aecmos_score = float(np.clip(5.0 - echo_strength * 8.0, 1.0, 5.0))
+
+        proxy_warn = "Proxy (install `onnxruntime` + aecmos.onnx for accurate scores)"
+        return _with_trust(
+            MetricResult(
+                "AECMOS (proxy)", round(aecmos_score, 2), "MOS [1–5]",
+                "Echo-aware quality proxy via autocorrelation tail. " + proxy_warn,
+                "perceptual",
+                higher_is_better=True,
+                reference_range=(3.5, 5.0),
+                warning=proxy_warn if aecmos_score < 4.0 else None,
+            ),
+            confidence="proxy",
+            calibration_note="AECMOS proxy values only approximate echo severity and should not be treated as official MOS.",
+        )
+    except Exception as e:
+        warnings.warn(f"AECMOS proxy failed: {e}")
+        return MetricResult("AECMOS", None, "", f"Failed: {e}", "perceptual")
+
+
 def compute_perceptual(audio: NDArray, sr: int, ref_audio=None, ref_sr=None) -> list[MetricResult]:
     results = []
 
     # ── Non-intrusive ───────────────────────────────────────────────────────
 
-    # DNSMOS-like (approximate via SNR + spectral measure)
-    # Real DNSMOS requires ONNX model; we compute a proxy
     mono = _to_mono(audio)
+
+    # DNSMOS P.835 (ONNX or proxy)
+    results.extend(_compute_dnsmos_p835(mono, sr))
+
+    # AECMOS echo-aware quality
+    results.append(_compute_aecmos(mono, sr))
+
+    # Heuristic MOS proxy (kept for backward compatibility / cross-reference)
     results.append(_compute_pseudo_mos(mono, sr))
+    results.extend(_compute_learned_mos(mono, sr))
+    results.extend(_compute_codec_artifact_metrics(mono, sr))
 
     # P.563 proxy (mono, phone-band SNR based)
     results.append(_compute_p563_proxy(mono, sr))
@@ -913,21 +1329,173 @@ def _compute_pseudo_mos(mono: NDArray, sr: int) -> MetricResult:
         flat_penalty = max(0.0, (flatness_db + 10) / 20.0)  # penalty if very flat
         mos = float(np.clip(snr_score - flat_penalty * 0.5, 1.0, 5.0))
 
-        return MetricResult(
-            "Estimated MOS (non-intrusive proxy)", round(mos, 2), "MOS [1–5]",
-            "Heuristic MOS estimate (SNR + spectral shape). For accurate MOS install `dnsmos`.", "perceptual",
-            higher_is_better=True,
-            reference_range=(3.5, 5.0),
-            warning="Note: proxy only — use DNSMOS ONNX model for accurate MOS" if True else None,
+        return _with_trust(
+            MetricResult(
+                "Estimated MOS (non-intrusive proxy)", round(mos, 2), "MOS [1–5]",
+                "Heuristic MOS estimate (SNR + spectral shape). For accurate MOS install `dnsmos`.", "perceptual",
+                higher_is_better=True,
+                reference_range=(3.5, 5.0),
+                warning="Note: proxy only — use DNSMOS ONNX model for accurate MOS",
+            ),
+            confidence="proxy",
+            calibration_note="Estimated MOS is a heuristic blend and should be used for ranking, not certification.",
         )
     except Exception as e:
         return MetricResult("Estimated MOS (proxy)", None, "", f"Failed: {e}", "perceptual")
 
 
-def _compute_p563_proxy(mono: NDArray, sr: int) -> MetricResult:
-    """Simplified P.563-inspired non-intrusive quality metric."""
+def _compute_learned_mos(mono: NDArray, sr: int) -> list[MetricResult]:
+    """Optional learned-MOS estimators with proxy fallback."""
+    results: list[MetricResult] = []
+    try:
+        import onnxruntime as ort  # noqa: F401
+
+        target_sr = 16000
+        work = _resample(mono, sr, target_sr) if sr != target_sr else mono
+        n = 16000
+        chunk = work[:n] if len(work) >= n else np.pad(work, (0, n - len(work)))
+        chunk = chunk.astype(np.float32)[None, :]
+        model_specs = [
+            ("UTMOS", "utmos.onnx"),
+            ("SHEET MOS", "sheet.onnx"),
+        ]
+        for name, filename in model_specs:
+            model_path = Path(__file__).parent / filename
+            if not model_path.exists():
+                continue
+            sess = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
+            score = float(sess.run(None, {sess.get_inputs()[0].name: chunk})[0].reshape(-1)[0])
+            results.append(
+                _with_trust(
+                    MetricResult(
+                        name,
+                        round(float(np.clip(score, 1.0, 5.0)), 3),
+                        "MOS [1–5]",
+                        f"Learned MOS estimate from {filename}",
+                        "perceptual",
+                        higher_is_better=True,
+                        reference_range=(3.5, 5.0),
+                    ),
+                    confidence="model",
+                    calibration_note=f"{name} depends on the bundled {filename} weights and runtime backend.",
+                )
+            )
+    except ImportError:
+        pass
+    except Exception as e:
+        warnings.warn(f"Learned MOS ONNX inference failed: {e}; using proxy")
+
+    if results:
+        return results
+
+    mos_metric = _compute_pseudo_mos(mono, sr)
+    p563_metric = _compute_p563_proxy(mono, sr)
+    mos_value = float(mos_metric.value) if mos_metric.value is not None else 3.0
+    p563_value = float(p563_metric.value) if p563_metric.value is not None else 3.0
+    utmos_proxy = float(np.clip(0.75 * mos_value + 0.25 * (p563_value / 4.5 * 5.0), 1.0, 5.0))
+    sheet_proxy = float(np.clip(0.60 * mos_value + 0.40 * (p563_value / 4.5 * 5.0), 1.0, 5.0))
+    proxy_warn = "Proxy (install `onnxruntime` + UTMOS/SHEET model files for learned MOS)"
+    return [
+        _with_trust(
+            MetricResult(
+                "UTMOS (proxy)", round(utmos_proxy, 2), "MOS [1–5]",
+                "Learned-MOS proxy blended from existing perceptual quality cues. " + proxy_warn,
+                "perceptual",
+                higher_is_better=True,
+                reference_range=(3.5, 5.0),
+                warning=proxy_warn,
+            ),
+            confidence="proxy",
+            calibration_note="Proxy learned-MOS values approximate the trend of missing model-backed scores.",
+        ),
+        _with_trust(
+            MetricResult(
+                "SHEET MOS (proxy)", round(sheet_proxy, 2), "MOS [1–5]",
+                "Speech naturalness proxy blended from existing perceptual quality cues. " + proxy_warn,
+                "perceptual",
+                higher_is_better=True,
+                reference_range=(3.5, 5.0),
+                warning=proxy_warn,
+            ),
+            confidence="proxy",
+            calibration_note="Proxy learned-MOS values approximate the trend of missing model-backed scores.",
+        ),
+    ]
+
+
+def _compute_codec_artifact_metrics(mono: NDArray, sr: int) -> list[MetricResult]:
+    """Heuristic codec-artifact metrics for compressed or bandwidth-limited audio."""
     try:
         from scipy.signal import stft as scipy_stft
+
+        f, _, Zxx = scipy_stft(mono, fs=sr, nperseg=1024, noverlap=768)
+        mag = np.abs(Zxx) + _eps()
+        power = mag ** 2
+        mean_power = power.mean(axis=1)
+        mean_db = 10.0 * np.log10(mean_power + _eps())
+        peak_db = float(np.max(mean_db))
+
+        active_bins = np.where(mean_db >= peak_db - 45.0)[0]
+        cutoff_hz = float(f[active_bins[-1]]) if len(active_bins) else 0.0
+
+        smooth_kernel = np.ones(9, dtype=np.float64) / 9.0
+        smooth_db = np.convolve(mean_db, smooth_kernel, mode="same")
+        band_mask = (f >= 1000) & (f <= min(sr / 2.0, 8000.0))
+        hole_ratio = float(np.mean((smooth_db[band_mask] - mean_db[band_mask]) > 12.0) * 100.0) if np.any(band_mask) else 0.0
+
+        frame_energy = power.sum(axis=0)
+        if len(frame_energy) >= 6:
+            diff = np.diff(frame_energy)
+            onset_idx = np.where(diff > np.percentile(diff, 90))[0] + 1
+            pre_echo_samples = []
+            for idx in onset_idx:
+                pre = float(np.mean(frame_energy[max(0, idx - 2):idx])) if idx > 0 else 0.0
+                post = float(np.mean(frame_energy[idx:min(len(frame_energy), idx + 2)]))
+                if post > 0:
+                    pre_echo_samples.append(pre / (post + _eps()))
+            pre_echo_risk = float(np.clip(np.mean(pre_echo_samples), 0.0, 1.0)) if pre_echo_samples else 0.0
+        else:
+            pre_echo_risk = 0.0
+
+        expected_cutoff = min(sr / 2.0, 16000.0)
+        cutoff_penalty = float(np.clip((expected_cutoff - cutoff_hz) / max(expected_cutoff, 1.0), 0.0, 1.0))
+        artifact_risk = float(
+            np.clip(100.0 * (0.45 * cutoff_penalty + 0.35 * (hole_ratio / 100.0) + 0.20 * pre_echo_risk), 0.0, 100.0)
+        )
+
+        return [
+            MetricResult(
+                "Estimated Codec Bandwidth Cutoff", round(cutoff_hz, 1), "Hz",
+                "Estimated upper bandwidth before codec-style low-pass attenuation dominates.", "perceptual",
+                higher_is_better=True,
+            ),
+            MetricResult(
+                "Spectral Hole Ratio", round(hole_ratio, 2), "%",
+                "Percentage of mid/high-band bins with deep notches relative to the smoothed spectrum.", "perceptual",
+                higher_is_better=False,
+            ),
+            MetricResult(
+                "Pre-echo Risk", round(pre_echo_risk, 3), "",
+                "Transient smear heuristic. Higher values suggest codec pre-echo or ringing.", "perceptual",
+                higher_is_better=False,
+            ),
+            MetricResult(
+                "Codec Artifact Risk", round(artifact_risk, 2), "%",
+                "Combined heuristic risk from bandwidth loss, spectral holes, and pre-echo cues.", "perceptual",
+                higher_is_better=False,
+                warning="Elevated codec artifact risk" if artifact_risk >= 40.0 else None,
+            ),
+        ]
+    except Exception as e:
+        warnings.warn(f"Codec artifact metrics failed: {e}")
+        return [MetricResult("Codec Artifact Risk", None, "", f"Failed: {e}", "perceptual")]
+
+
+def _compute_p563_proxy(mono: NDArray, sr: int) -> MetricResult:
+    """Improved P.563-inspired non-intrusive narrowband quality proxy."""
+    try:
+        from scipy.signal import stft as scipy_stft
+
         # Resample to 8 kHz if needed (P.563 is narrowband)
         if sr != 8000:
             mono = _resample(mono, sr, 8000)
@@ -943,28 +1511,62 @@ def _compute_p563_proxy(mono: NDArray, sr: int) -> MetricResult:
         if active.sum() == 0:
             return MetricResult("P.563 Proxy Score", None, "", "No active frames", "perceptual")
 
-        # Waveform discontinuities (proxy for circuit noise)
-        discontinuities = int(np.sum(np.abs(np.diff(mono)) > 0.5))
-
-        # Unnatural silence ratio
-        silence_ratio = 1.0 - float(np.mean(active))
-
-        # Frequency imbalance: should have most energy 300-3400 Hz
+        # Frequency balance: narrowband speech should live mostly in 300–3400 Hz
         speech_idx = (f >= 300) & (f <= 3400)
+        rumble_idx = f < 200
+        hiss_idx = f > 3400
         speech_energy = float(power[speech_idx, :].sum()) if speech_idx.any() else 0.0
+        rumble_energy = float(power[rumble_idx, :].sum()) if rumble_idx.any() else 0.0
+        hiss_energy = float(power[hiss_idx, :].sum()) if hiss_idx.any() else 0.0
         total_energy = float(power.sum()) + _eps()
         speech_ratio = speech_energy / total_energy
+        rumble_ratio = rumble_energy / total_energy
+        hiss_ratio = hiss_energy / total_energy
 
-        # Heuristic score
-        score = 4.0 * speech_ratio - 0.5 * silence_ratio - discontinuities * 0.001
+        # Spectral flatness over active frames: noisier / more artifacted signals are flatter.
+        active_power = power[:, active] + _eps()
+        frame_flatness = np.exp(np.mean(np.log(active_power), axis=0)) / np.mean(active_power, axis=0)
+        flatness = float(np.mean(frame_flatness))
+
+        # Simple temporal artifact cues.
+        discontinuities = int(np.sum(np.abs(np.diff(mono)) > 0.5))
+        duration_s = max(len(mono) / sr, _eps())
+        discontinuity_rate = discontinuities / duration_s
+        clipping_ratio = float(np.mean(np.abs(mono) >= 0.98))
+        silence_ratio = 1.0 - float(np.mean(active))
+
+        # Map each cue to normalized quality / penalty terms.
+        speech_score = float(np.clip((speech_ratio - 0.35) / 0.45, 0.0, 1.0))
+        activity_score = float(np.clip(1.0 - max(0.0, silence_ratio - 0.15) / 0.55, 0.0, 1.0))
+        flatness_penalty = float(np.clip(max(0.0, flatness - 0.22) / 0.38, 0.0, 1.0))
+        rumble_penalty = float(np.clip(max(0.0, rumble_ratio - 0.08) / 0.22, 0.0, 1.0))
+        hiss_penalty = float(np.clip(max(0.0, hiss_ratio - 0.10) / 0.25, 0.0, 1.0))
+        discontinuity_penalty = float(np.clip(discontinuity_rate / 12.0, 0.0, 1.0))
+        clipping_penalty = float(np.clip(clipping_ratio * 30.0, 0.0, 1.0))
+
+        score = (
+            1.0
+            + 2.4 * speech_score
+            + 0.8 * activity_score
+            - 0.9 * flatness_penalty
+            - 0.6 * rumble_penalty
+            - 0.8 * hiss_penalty
+            - 0.8 * discontinuity_penalty
+            - 1.1 * clipping_penalty
+        )
         score = float(np.clip(score, 1.0, 4.5))
 
-        return MetricResult(
-            "P.563 Proxy (NB Quality Estimate)", round(score, 2), "MOS [1–4.5]",
-            "Narrowband non-intrusive quality proxy (P.563-inspired heuristic)", "perceptual",
-            higher_is_better=True,
-            reference_range=(3.0, 4.5),
-            warning="Proxy only — install `itu-p563` for true P.563",
+        return _with_trust(
+            MetricResult(
+                "P.563 Proxy (NB Quality Estimate)", round(score, 2), "MOS [1–4.5]",
+                "Improved narrowband non-intrusive quality proxy using spectral balance, "
+                "activity continuity, artifact rate, and clipping cues", "perceptual",
+                higher_is_better=True,
+                reference_range=(3.0, 4.5),
+                warning="Proxy only — install `itu-p563` for true P.563",
+            ),
+            confidence="proxy",
+            calibration_note="P.563 proxy is tuned for narrowband speech and should not be interpreted as a true ITU score.",
         )
     except Exception as e:
         return MetricResult("P.563 Proxy", None, "", f"Failed: {e}", "perceptual")
@@ -981,22 +1583,29 @@ def _compute_pesq(y: NDArray, r: NDArray, sr: int) -> MetricResult:
             r = _resample(r, sr, target_sr)
             sr = target_sr
         score = float(pesq_fn(sr, r, y, mode))
-        return MetricResult(
-            "PESQ (ITU-T P.862)", round(score, 3), "MOS-LQO",
-            f"Perceptual Evaluation of Speech Quality [{mode.upper()} mode] (1.0–4.5)", "perceptual",
-            higher_is_better=True,
-            reference_range=(3.0, 4.5),
+        return _with_trust(
+            MetricResult(
+                "PESQ (ITU-T P.862)", round(score, 3), "MOS-LQO",
+                f"Perceptual Evaluation of Speech Quality [{mode.upper()} mode] (1.0–4.5)", "perceptual",
+                higher_is_better=True,
+                reference_range=(3.0, 4.5),
+            ),
+            confidence="measured",
         )
     except ImportError:
         # Fallback proxy
         lsd = _log_spectral_distance(y, r, sr)
         if lsd is not None:
             mos_proxy = float(np.clip(4.5 - lsd / 5.0, 1.0, 4.5))
-            return MetricResult(
-                "PESQ proxy (install `pesq` for true score)", round(mos_proxy, 3), "MOS-LQO (approx)",
-                "Approximate PESQ via log-spectral distance mapping", "perceptual",
-                higher_is_better=True,
-                warning="Install `pip install pesq` for accurate PESQ score",
+            return _with_trust(
+                MetricResult(
+                    "PESQ proxy (install `pesq` for true score)", round(mos_proxy, 3), "MOS-LQO (approx)",
+                    "Approximate PESQ via log-spectral distance mapping", "perceptual",
+                    higher_is_better=True,
+                    warning="Install `pip install pesq` for accurate PESQ score",
+                ),
+                confidence="proxy",
+                calibration_note="PESQ proxy uses log-spectral distance and is not a standards-compliant replacement.",
             )
         return MetricResult("PESQ", None, "", "Install `pip install pesq` for PESQ", "perceptual")
     except Exception as e:
@@ -1008,22 +1617,29 @@ def _compute_stoi(y: NDArray, r: NDArray, sr: int) -> MetricResult:
     try:
         from pystoi import stoi as stoi_fn
         score = float(stoi_fn(r, y, sr, extended=False))
-        return MetricResult(
-            "STOI (Short-Time Objective Intelligibility)", round(score, 4), "[0–1]",
-            "Speech intelligibility score (1 = perfectly intelligible)", "perceptual",
-            higher_is_better=True,
-            reference_range=(0.7, 1.0),
-            warning="Low intelligibility" if score < 0.6 else None,
+        return _with_trust(
+            MetricResult(
+                "STOI (Short-Time Objective Intelligibility)", round(score, 4), "[0–1]",
+                "Speech intelligibility score (1 = perfectly intelligible)", "perceptual",
+                higher_is_better=True,
+                reference_range=(0.7, 1.0),
+                warning="Low intelligibility" if score < 0.6 else None,
+            ),
+            confidence="measured",
         )
     except ImportError:
         # Spectral correlation proxy for intelligibility
         sc = _spectral_correlation(y, r, sr)
         if sc is not None:
-            return MetricResult(
-                "STOI proxy (install `pystoi` for true score)", round(sc, 4), "[0–1] (approx)",
-                "Approximate intelligibility via spectral correlation", "perceptual",
-                higher_is_better=True,
-                warning="Install `pip install pystoi` for accurate STOI",
+            return _with_trust(
+                MetricResult(
+                    "STOI proxy (install `pystoi` for true score)", round(sc, 4), "[0–1] (approx)",
+                    "Approximate intelligibility via spectral correlation", "perceptual",
+                    higher_is_better=True,
+                    warning="Install `pip install pystoi` for accurate STOI",
+                ),
+                confidence="proxy",
+                calibration_note="STOI proxy uses spectral correlation and is only suitable for rough relative comparison.",
             )
         return MetricResult("STOI", None, "", "Install `pip install pystoi` for STOI", "perceptual")
     except Exception as e:
@@ -1042,7 +1658,8 @@ def _compute_si_sdr(y: NDArray, r: NDArray) -> Optional[float]:
             (np.dot(target, target) + _eps()) / (np.dot(noise, noise) + _eps())
         )
         return float(si_sdr)
-    except Exception:
+    except Exception as e:
+        _warn_metric_failure("Log-Spectral Distance", e)
         return None
 
 
@@ -1053,7 +1670,8 @@ def _compute_sdr(y: NDArray, r: NDArray) -> Optional[float]:
             (np.dot(r, r) + _eps()) / (np.dot(noise, noise) + _eps())
         )
         return float(sdr)
-    except Exception:
+    except Exception as e:
+        _warn_metric_failure("Spectral Correlation", e)
         return None
 
 
@@ -1068,7 +1686,8 @@ def _log_spectral_distance(y: NDArray, r: NDArray, sr: int) -> Optional[float]:
         pr = np.abs(Zr[:, :n]) ** 2 + _eps()
         lsd = float(np.mean(np.sqrt(np.mean((10 * np.log10(py / pr)) ** 2, axis=0))))
         return lsd
-    except Exception:
+    except Exception as e:
+        _warn_metric_failure("Cepstral Distance", e)
         return None
 
 
@@ -1085,7 +1704,8 @@ def _spectral_correlation(y: NDArray, r: NDArray, sr: int) -> Optional[float]:
         norms_r = np.linalg.norm(mr, axis=0) + _eps()
         corr = float(np.mean(np.sum(my * mr, axis=0) / (norms_y * norms_r)))
         return corr
-    except Exception:
+    except Exception as e:
+        _warn_metric_failure("Spectral Correlation", e)
         return None
 
 
@@ -1099,7 +1719,8 @@ def _cepstral_distance(y: NDArray, r: NDArray, sr: int, n_ceps=13) -> Optional[f
         diff = my[:, :n] - mr[:, :n]
         cd = float(np.mean(np.sqrt(np.sum(diff ** 2, axis=0))))
         return cd
-    except Exception:
+    except Exception as e:
+        _warn_metric_failure("Cepstral Distance", e)
         return None
 
 
@@ -1111,7 +1732,10 @@ from .metrics_prosody       import compute_prosody
 from .metrics_psychoacoustic import compute_psychoacoustic
 from .metrics_speaker       import compute_speaker
 
-METRIC_GROUPS: dict[str, callable] = {
+MetricGroupFn = Callable[[NDArray, int, Optional[NDArray], Optional[int]], list[MetricResult]]
+
+
+METRIC_GROUPS: dict[str, MetricGroupFn] = {
     "basic":          compute_basic,
     "loudness":       compute_loudness,
     "spectral":       compute_spectral,
@@ -1123,3 +1747,32 @@ METRIC_GROUPS: dict[str, callable] = {
     "psychoacoustic": compute_psychoacoustic,
     "speaker":        compute_speaker,
 }
+
+_BUILTIN_METRIC_GROUPS = set(METRIC_GROUPS)
+
+
+def available_metric_groups() -> list[str]:
+    """Return the currently registered metric group names."""
+    return list(METRIC_GROUPS.keys())
+
+
+def register_metric_group(name: str, fn: MetricGroupFn, *, overwrite: bool = False) -> None:
+    """Register a custom metric group for the analyzer and public API."""
+    normalized = name.strip().lower()
+    if not normalized:
+        raise ValueError("Metric group name must be non-empty.")
+    if normalized == "all":
+        raise ValueError("'all' is reserved and cannot be registered as a metric group.")
+    if normalized in METRIC_GROUPS and not overwrite:
+        raise ValueError(f"Metric group '{normalized}' is already registered.")
+    METRIC_GROUPS[normalized] = fn
+
+
+def unregister_metric_group(name: str, *, allow_builtin: bool = False) -> None:
+    """Unregister a custom metric group."""
+    normalized = name.strip().lower()
+    if normalized in _BUILTIN_METRIC_GROUPS and not allow_builtin:
+        raise ValueError(f"Metric group '{normalized}' is built in and cannot be removed.")
+    if normalized not in METRIC_GROUPS:
+        raise KeyError(normalized)
+    del METRIC_GROUPS[normalized]

@@ -333,10 +333,14 @@ def _estimate_gender(
             "Estimated Gender", label, "",
             "Heuristic from F0 mean. 145–180 Hz is a biological overlap zone; "
             "many voices are ambiguous. Not a classification model.", "speaker",
+            confidence="heuristic",
+            calibration_note="Gender estimate is inferred from pitch statistics and should never be treated as identity ground truth.",
         ),
         MetricResult(
             "Gender Confidence", round(conf, 2), "0–1",
             "Distance from F0 overlap zone as a proxy for confidence in gender estimate.", "speaker",
+            confidence="heuristic",
+            calibration_note="Confidence only reflects distance from the heuristic overlap zone, not actual classifier accuracy.",
         ),
     ]
 
@@ -368,6 +372,8 @@ def _estimate_age(
             "Estimated Age Range", "child (< 12 years est.)", "",
             "Heuristic age estimate. F0 > 250 Hz is consistent with pre-adolescent voice.",
             "speaker",
+            confidence="heuristic",
+            calibration_note="Age range is inferred from acoustic correlates and is not a biometric or medical assessment.",
         )]
 
     score   = 0
@@ -422,13 +428,20 @@ def _estimate_age(
         "Estimated Age Range", age_range, "",
         f"Heuristic acoustic age estimate (± ~15 years). {note}. "
         "Not a medical or biometric assessment.", "speaker",
+        confidence="heuristic",
+        calibration_note="Age range is inferred from acoustic correlates and is not a biometric or medical assessment.",
     )]
 
 
 # ─── Entry point ─────────────────────────────────────────────────────────────
 
 def compute_speaker(
-    audio: NDArray, sr: int, ref_audio=None, ref_sr=None
+    audio: NDArray,
+    sr: int,
+    ref_audio=None,
+    ref_sr=None,
+    *,
+    include_demographics: bool = False,
 ) -> list[MetricResult]:
     """
     Full speaker characteristic analysis:
@@ -490,13 +503,14 @@ def compute_speaker(
     try:
         from .metrics import _compute_hnr
         hnr_db = _compute_hnr(mono, sr)
-    except Exception:
-        pass
+    except Exception as e:
+        warnings.warn(f"Speaker HNR fallback failed: {e}")
 
-    # ── Gender ───────────────────────────────────────────────────────────────
-    results.extend(_estimate_gender(f0_mean, voiced_pct))
+    if include_demographics:
+        # ── Gender ───────────────────────────────────────────────────────────
+        results.extend(_estimate_gender(f0_mean, voiced_pct))
 
-    # ── Age ──────────────────────────────────────────────────────────────────
-    results.extend(_estimate_age(f0_mean, f0_std, jitter_pct, shimmer_pct, hnr_db, tilt))
+        # ── Age ──────────────────────────────────────────────────────────────
+        results.extend(_estimate_age(f0_mean, f0_std, jitter_pct, shimmer_pct, hnr_db, tilt))
 
     return results

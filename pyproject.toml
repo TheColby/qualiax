@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qualiax"
-version = "0.3.0"
+version = "0.11.0"
 description = "Perceptual speech and audio quality analyzer CLI"
 readme = "README.md"
 license = { text = "MIT" }
@@ -45,6 +45,18 @@ perceptual = [
     "pesq>=0.0.4",
     "pystoi>=0.3",
 ]
+# Live capture mode
+live = [
+    "sounddevice>=0.4",
+]
+# Event-driven watch mode
+watch = [
+    "watchdog>=4.0",
+]
+# Learned MOS / neural pitch
+ml = [
+    "onnxruntime>=1.17",
+]
 # Full install (everything)
 all = [
     "soundfile>=0.12",
@@ -52,6 +64,9 @@ all = [
     "pesq>=0.0.4",
     "pystoi>=0.3",
     "librosa>=0.10",
+    "sounddevice>=0.4",
+    "watchdog>=4.0",
+    "onnxruntime>=1.17",
 ]
 
 [project.scripts]
