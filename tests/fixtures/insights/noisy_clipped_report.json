@@ -1,0 +1,51 @@
+[
+  {
+    "schema_version": "3.5",
+    "tool_version": "0.11.0",
+    "file": "fixture.wav",
+    "source_file": null,
+    "segment_index": null,
+    "total_segments": null,
+    "segment_start_s": null,
+    "segment_end_s": null,
+    "duration_s": 1.0,
+    "sample_rate": 16000,
+    "channels": 1,
+    "bit_depth": null,
+    "content_type": null,
+    "speech_confidence": null,
+    "notes": [],
+    "confidence_notes": [],
+    "diagnostics": [],
+    "group_health": [],
+    "provenance": null,
+    "insights": {},
+    "error": null,
+    "metrics": [
+      {
+        "name": "SNR",
+        "value": 8.0,
+        "unit": "dB",
+        "description": "",
+        "group": "noise",
+        "higher_is_better": null,
+        "warning": null,
+        "reference_range": null,
+        "confidence": null,
+        "calibration_note": null
+      },
+      {
+        "name": "True Peak",
+        "value": 0.1,
+        "unit": "dBTP",
+        "description": "",
+        "group": "loudness",
+        "higher_is_better": null,
+        "warning": null,
+        "reference_range": null,
+        "confidence": null,
+        "calibration_note": null
+      }
+    ]
+  }
+]

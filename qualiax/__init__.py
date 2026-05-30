@@ -2,6 +2,16 @@
 
 from .api import AnalysisResult, PathLike, analyze, analyze_async, analyze_many, analyze_one
 from .contracts import get_json_schema
+from .insights import (
+    INSIGHT_SCHEMA_VERSION,
+    InsightPayload,
+    InsightValidationIssue,
+    build_insight_summary_payload,
+    enrich_existing_report,
+    enrich_results,
+    export_flagged_segment_snippets,
+    validate_insights_report,
+)
 from .models import DiagnosticEntry, FileResult, GroupHealth, MetricResult, ProvenanceInfo
 from .metrics import (
     available_metric_groups,
@@ -56,6 +66,14 @@ __all__ = [
     "MetricOutlier",
     "build_scorecard",
     "render_scorecard",
+    "enrich_results",
+    "enrich_existing_report",
+    "INSIGHT_SCHEMA_VERSION",
+    "InsightPayload",
+    "InsightValidationIssue",
+    "build_insight_summary_payload",
+    "export_flagged_segment_snippets",
+    "validate_insights_report",
     "get_json_schema",
     "ValidationIssue",
     "validate_report_payload",

@@ -91,6 +91,7 @@ class Scorecard:
     status_counts: dict[str, int]
     confidence_notes: tuple[str, ...]
     metric_rollups: tuple[MetricRollup, ...] = field(default_factory=tuple)
+    insight_summary: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -100,6 +101,7 @@ class Scorecard:
             "status_counts": self.status_counts,
             "confidence_notes": list(self.confidence_notes),
             "metric_rollups": [rollup.to_dict() for rollup in self.metric_rollups],
+            "insight_summary": self.insight_summary,
         }
 
 
@@ -134,7 +136,46 @@ def build_scorecard(results: list[FileResult]) -> Scorecard:
         status_counts=status_counts,
         confidence_notes=tuple(confidence_notes),
         metric_rollups=tuple(rollups),
+        insight_summary=_build_insight_summary(results),
     )
+
+
+def _build_insight_summary(results: list[FileResult]) -> dict[str, Any]:
+    defect_label_counts: dict[str, int] = {}
+    label_severity_counts: dict[str, int] = {}
+    ci_status_counts: dict[str, int] = {}
+    ci_check_counts: dict[str, int] = {}
+    drift_status_counts: dict[str, int] = {}
+    dataset_issue_counts: dict[str, int] = {}
+
+    for result in results:
+        insights = result.insights or {}
+        for label in insights.get("defect_labels", []):
+            label_id = str(label.get("id", "unknown"))
+            severity = str(label.get("severity", "info"))
+            defect_label_counts[label_id] = defect_label_counts.get(label_id, 0) + 1
+            label_severity_counts[severity] = label_severity_counts.get(severity, 0) + 1
+        for check in insights.get("ci_checks", []):
+            status = str(check.get("status", "unknown"))
+            check_id = str(check.get("id", "unknown"))
+            ci_status_counts[status] = ci_status_counts.get(status, 0) + 1
+            ci_check_counts[check_id] = ci_check_counts.get(check_id, 0) + 1
+        drift = insights.get("drift_monitor", {})
+        if drift:
+            status = str(drift.get("status", "unknown"))
+            drift_status_counts[status] = drift_status_counts.get(status, 0) + 1
+        for issue in insights.get("dataset_audit", []):
+            issue_id = str(issue.get("id", "unknown"))
+            dataset_issue_counts[issue_id] = dataset_issue_counts.get(issue_id, 0) + 1
+
+    return {
+        "defect_label_counts": dict(sorted(defect_label_counts.items())),
+        "label_severity_counts": dict(sorted(label_severity_counts.items())),
+        "ci_status_counts": dict(sorted(ci_status_counts.items())),
+        "ci_check_counts": dict(sorted(ci_check_counts.items())),
+        "drift_status_counts": dict(sorted(drift_status_counts.items())),
+        "dataset_issue_counts": dict(sorted(dataset_issue_counts.items())),
+    }
 
 
 def render_scorecard(scorecard: Scorecard, fmt: str) -> str:
@@ -325,6 +366,12 @@ def _render_markdown(scorecard: Scorecard) -> str:
     if scorecard.confidence_notes:
         lines.extend(["", "## Confidence & Calibration", ""])
         lines.extend(f"- {note}" for note in scorecard.confidence_notes)
+    if any(scorecard.insight_summary.values()):
+        lines.extend(["", "## Insight Rollups", ""])
+        for section, counts in scorecard.insight_summary.items():
+            if not counts:
+                continue
+            lines.append(f"- {_md(section)}: " + ", ".join(f"`{_md(str(name))}={count}`" for name, count in counts.items()))
     lines.extend(["", "## Metric Rollups", ""])
     lines.append("| Group | Metric | Count | Warn | Kind | Confidence | Mean | Median | P05 | P95 | Top Values | Min | Max | Outliers |")
     lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
@@ -385,6 +432,17 @@ def _render_html(scorecard: Scorecard) -> str:
             + "".join(f"<li>{escape(note)}</li>" for note in scorecard.confidence_notes)
             + "</ul></section>"
         )
+    insight_summary = ""
+    if any(scorecard.insight_summary.values()):
+        insight_summary = (
+            "<section><h2>Insight Rollups</h2><ul>"
+            + "".join(
+                f"<li>{escape(section)}: {escape(', '.join(f'{name}={count}' for name, count in counts.items()))}</li>"
+                for section, counts in scorecard.insight_summary.items()
+                if counts
+            )
+            + "</ul></section>"
+        )
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -410,6 +468,7 @@ def _render_html(scorecard: Scorecard) -> str:
       <div class="chip">{scorecard.file_count} files</div>
     </div>
     {confidence}
+    {insight_summary}
     <table>
       <thead>
         <tr>

@@ -173,3 +173,41 @@ def test_scorecard_captures_categorical_rollups_and_confidence_counts():
     assert rollup.dominant_category == "speech"
     assert rollup.confidence_counts == {"model": 3}
     assert payload["metric_rollups"][0]["category_counts"]["speech"] == 2
+
+
+def test_scorecard_rolls_up_insight_labels_ci_and_drift():
+    scorecard = build_scorecard(
+        [
+            FileResult(
+                path="a.wav",
+                insights={
+                    "defect_labels": [
+                        {"id": "noisy_floor", "severity": "fail"},
+                        {"id": "clipping_risk", "severity": "warn"},
+                    ],
+                    "ci_checks": [{"id": "audio_quality_gate", "status": "fail"}],
+                    "drift_monitor": {"status": "drift"},
+                    "dataset_audit": [{"id": "duplicate_quality_fingerprint", "severity": "warn"}],
+                },
+            ),
+            FileResult(
+                path="b.wav",
+                insights={
+                    "defect_labels": [{"id": "noisy_floor", "severity": "fail"}],
+                    "ci_checks": [{"id": "audio_quality_gate", "status": "pass"}],
+                    "drift_monitor": {"status": "stable"},
+                    "dataset_audit": [],
+                },
+            ),
+        ]
+    )
+
+    payload = json.loads(render_scorecard(scorecard, "json"))
+    markdown = render_scorecard(scorecard, "markdown")
+
+    assert payload["insight_summary"]["defect_label_counts"]["noisy_floor"] == 2
+    assert payload["insight_summary"]["label_severity_counts"]["fail"] == 2
+    assert payload["insight_summary"]["ci_status_counts"]["fail"] == 1
+    assert payload["insight_summary"]["drift_status_counts"]["drift"] == 1
+    assert "Insight Rollups" in markdown
+    assert "noisy_floor" in markdown

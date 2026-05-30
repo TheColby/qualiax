@@ -37,6 +37,15 @@ def test_help_lists_all_public_metric_groups():
     assert "--watch-debounce" in result.output
     assert "--strict" in result.output
     assert "--include-demographics" in result.output
+    assert "--insights" in result.output
+    assert "--baseline" in result.output
+    assert "--ci" in result.output
+    assert "--drift" in result.output
+    assert "--drift-state" in result.output
+    assert "--fingerprint-sensitivity" in result.output
+    assert "--insight-rules" in result.output
+    assert "--insight-snippets" in result.output
+    assert "--insights-summary" in result.output
     assert "speech_quality" not in result.output
 
 

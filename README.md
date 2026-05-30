@@ -13,6 +13,7 @@ qualiax ./incoming --watch --watch-limit 3 --output arrivals.json --silent
 qualiax episode.wav --preset podcast --output report.json --silent
 qualiax ./calls/ --output results.json --scorecard scorecard.md --silent
 qualiax diff before.json after.json --format markdown
+qualiax ./calls/ --insights --baseline baseline.json --ci --output qa.json --silent
 ```
 
 A sample file is included to try immediately:
@@ -50,6 +51,7 @@ To generate a small set of demo outputs end-to-end:
   - [Output Formats](#output-formats)
   - [Diff Mode](#diff-mode)
   - [Threshold Rules](#threshold-rules)
+  - [Composite Insights](#composite-insights)
   - [Task Presets](#task-presets)
   - [Stdin Pipes](#stdin-pipes)
   - [Microphone Mode](#microphone-mode)
@@ -101,6 +103,7 @@ To generate a small set of demo outputs end-to-end:
 - **Task presets** — built-in analysis profiles for podcasts, call-center QA, speech enhancement, and music mastering
 - **Confidence & calibration notes** — proxy, heuristic, and model-backed caveats now surface in reports and JSON
 - **Structured diagnostics & provenance** — machine-readable diagnostics, per-group health, backend/runtime details, and model asset fingerprints are emitted in JSON outputs
+- **Composite QA insights** — optional `--insights` payloads add quality fingerprints, defect labels, repair suggestions, baseline comparison, drift checks, dataset audit notes, CI gates, MOS explanations, and segment heatmaps
 - **Built-in output contracts** — JSON Schema documents plus validation helpers for reports, JSONL streams, and scorecards
 - **Public Python API** — call `analyze(...)`, `analyze_one(...)`, `analyze_many(...)`, or `await analyze_async(...)` and get typed `FileResult` / `MetricResult` objects back
 - **Plugin interface** — register custom metric groups without forking the built-in registry
@@ -321,6 +324,24 @@ qualiax --preset podcast --lint-rules
 ```
 
 Lint mode reports duplicate rules, invalid groups, and contradictory thresholds like `min > max`. During normal analysis, explicit `--rules` files now treat unmatched metric names as compliance violations instead of note-only drift.
+
+### Composite Insights
+
+Add a higher-level QA layer on top of the measured metrics:
+
+```bash
+qualiax ./calls/ --insights --output qa.json --silent
+qualiax ./calls/ --insights --baseline baseline.json --drift --drift-state drift.json --output qa.html --silent
+qualiax generated.wav --insights --ci --output gate.json --silent
+qualiax long_call.wav --segment-seconds 30 --insights --insight-snippets snippets --output qa.json --silent
+qualiax ./calls --insights --insight-rules team-rules.json --insights-summary summary.json --output qa.json --silent
+qualiax insights qa.json --output enriched.json --silent
+qualiax insights validate enriched.json
+```
+
+`--insights` adds a versioned structured `insights` object to each result with a configurable quality fingerprint, human-readable defect labels with severity and metric evidence, repair suggestions, MOS explanations, triage rank, dataset-audit notes, and segment heatmaps when segment metadata is present. `--baseline` compares the current run against a prior JSON report using baseline mean and percentile bands plus baseline provenance, `--drift` compares each result against the previous result in the run or watch stream, and `--drift-state` persists that comparison across sessions. `--ci` adds quality-gate checks that return exit code `2` when they fail.
+
+Use `--fingerprint-sensitivity coarse|balanced|strict` to tune fingerprint bucket size. Built-in presets also tune insight label thresholds, so a podcast run treats loudness differently than a music-mastering run. `--insight-rules` accepts JSON/TOML team rules for labels, severity, suggestions, and CI gates. `--insight-snippets` exports short WAV snippets for flagged segments, and `--insights-summary` writes a compact pipeline JSON view with file, fingerprint, labels, CI checks, and triage only. The `qualiax insights` pseudo-subcommand enriches an existing JSON or JSONL report without re-analyzing audio, while `qualiax insights validate` checks existing insight payloads against the insight contract.
 
 ### Task Presets
 

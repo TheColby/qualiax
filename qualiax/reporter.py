@@ -8,7 +8,7 @@ import csv
 import io
 import math
 from html import escape
-from typing import Any, Optional
+from typing import Any
 
 from .models import FileResult, MetricResult
 from .version import OUTPUT_SCHEMA_VERSION, __version__
@@ -175,6 +175,19 @@ class ConsoleReporter:
                     Color.CYAN,
                 )
             )
+        if result.insights:
+            labels = result.insights.get("defect_labels", [])
+            suggestions = result.insights.get("repair_suggestions", [])
+            fingerprint = result.insights.get("quality_fingerprint", {}).get("signature")
+            lines.append("")
+            lines.append(self._c("  Insights", Color.BOLD, Color.MAGENTA))
+            lines.append(self._c("  " + "─" * 68, Color.DIM))
+            if fingerprint:
+                lines.append(self._c(f"    - fingerprint: {fingerprint}", Color.MAGENTA))
+            for label in labels[:5]:
+                lines.append(self._c(f"    - label: {label.get('id')} ({label.get('evidence')})", Color.YELLOW))
+            for suggestion in suggestions[:5]:
+                lines.append(self._c(f"    - suggestion: {suggestion}", Color.MAGENTA))
 
         # Group metrics
         groups = result.metrics_by_group()
@@ -366,6 +379,21 @@ class HtmlReporter:
       flex-wrap: wrap;
       justify-content: flex-end;
     }}
+    .workbench {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin: 0 0 22px;
+      align-items: center;
+    }}
+    .workbench input, .workbench select {{
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px 12px;
+      background: #fffdfa;
+      color: var(--ink);
+      font: inherit;
+    }}
     .chip {{
       border: 1px solid var(--line);
       background: rgba(255,255,255,0.75);
@@ -445,6 +473,38 @@ class HtmlReporter:
       background: #fff6ea;
       border: 1px solid #f2d1aa;
     }}
+    .insight-list {{
+      display: grid;
+      gap: 8px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }}
+    .insight-list li {{
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.72);
+    }}
+    .heatmap {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(42px, 1fr));
+      gap: 6px;
+      margin-top: 10px;
+    }}
+    .heat-cell {{
+      min-height: 28px;
+      border-radius: 7px;
+      border: 1px solid var(--line);
+      background: var(--ok-soft);
+      font-size: 0.75rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--ok);
+      font-weight: 700;
+    }}
+    .heat-cell.warn {{ background: var(--warn-soft); color: var(--warn); }}
     .notes h3, .groups h3 {{
       margin: 0 0 10px;
       font-size: 1rem;
@@ -561,8 +621,48 @@ class HtmlReporter:
         <span class="chip">{len(results)} file{'s' if len(results) != 1 else ''}</span>
       </div>
     </section>
+    <section class="workbench" aria-label="Report controls">
+      <input id="fileFilter" type="search" placeholder="Filter files or labels">
+      <input id="labelFilter" type="search" placeholder="Filter defect labels">
+      <select id="statusFilter">
+        <option value="">All statuses</option>
+        <option value="ok">OK</option>
+        <option value="warn">Needs Review</option>
+        <option value="partial">Partial</option>
+        <option value="error">Error</option>
+      </select>
+    </section>
     {cards}
   </main>
+  <script>
+    const fileFilter = document.getElementById('fileFilter');
+    const labelFilter = document.getElementById('labelFilter');
+    const statusFilter = document.getElementById('statusFilter');
+    function applyFilters() {{
+      const needle = fileFilter.value.toLowerCase();
+      const label = labelFilter.value.toLowerCase();
+      const status = statusFilter.value;
+      const hash = new URLSearchParams();
+      if (needle) hash.set('q', needle);
+      if (label) hash.set('label', label);
+      if (status) hash.set('status', status);
+      location.hash = hash.toString();
+      document.querySelectorAll('.result-card').forEach(card => {{
+        const textMatch = !needle || card.textContent.toLowerCase().includes(needle);
+        const labelMatch = !label || (card.dataset.labels || '').toLowerCase().includes(label);
+        const statusMatch = !status || card.dataset.status === status;
+        card.hidden = !(textMatch && labelMatch && statusMatch);
+      }});
+    }}
+    fileFilter.addEventListener('input', applyFilters);
+    labelFilter.addEventListener('input', applyFilters);
+    statusFilter.addEventListener('change', applyFilters);
+    const initial = new URLSearchParams(location.hash.slice(1));
+    fileFilter.value = initial.get('q') || '';
+    labelFilter.value = initial.get('label') || '';
+    statusFilter.value = initial.get('status') || '';
+    applyFilters();
+  </script>
 </body>
 </html>"""
 
@@ -635,14 +735,20 @@ class HtmlReporter:
                 + f"<li>Fingerprint: {escape(result.provenance.runtime_fingerprint or 'unavailable')}</li>"
                 + "</ul></section>"
             )
+        insights_html = self._render_insights(result)
 
         error_html = ""
         if result.error:
             error_html = f'<div class="error-box">{escape(result.error)}</div>'
 
         groups_html = "\n".join(self._render_group(group, groups[group]) for group in ordered)
+        label_data = " ".join(
+            str(label.get("id", ""))
+            for label in result.insights.get("defect_labels", [])
+            if isinstance(label, dict)
+        )
         return f"""
-<section class="result-card">
+<section class="result-card" data-status="{escape(status)}" data-labels="{escape(label_data)}">
   <div class="result-top">
     <div class="file-title">
       <h2>{escape(result.path)}</h2>
@@ -657,11 +763,70 @@ class HtmlReporter:
   {confidence_html}
   {diagnostics_html}
   {provenance_html}
+  {insights_html}
   {error_html}
   <section class="groups">
     {groups_html}
   </section>
 </section>"""
+
+    def _render_insights(self, result: FileResult) -> str:
+        if not result.insights:
+            return ""
+        fingerprint = result.insights.get("quality_fingerprint", {}).get("signature")
+        labels = result.insights.get("defect_labels", [])
+        suggestions = result.insights.get("repair_suggestions", [])
+        mos = result.insights.get("mos_explanation", [])
+        baseline = result.insights.get("baseline_comparison", {})
+        drift = result.insights.get("drift_monitor", {})
+        audit = result.insights.get("dataset_audit", [])
+        checks = result.insights.get("ci_checks", [])
+        heatmap = result.insights.get("segment_heatmap", {})
+
+        items = []
+        if fingerprint:
+            items.append(f"<li><strong>Fingerprint</strong>: {escape(fingerprint)}</li>")
+        for label in labels:
+            items.append(
+                f"<li><strong>{escape(str(label.get('id')))}</strong>: {escape(str(label.get('evidence', '')))}</li>"
+            )
+        for suggestion in suggestions:
+            items.append(f"<li><strong>Suggestion</strong>: {escape(str(suggestion))}</li>")
+        for entry in mos:
+            items.append(
+                f"<li><strong>MOS</strong>: {escape(str(entry.get('metric')))} {escape(str(entry.get('direction')))} - {escape(str(entry.get('reason')))}</li>"
+            )
+        if baseline:
+            items.append(f"<li><strong>Baseline</strong>: {escape(str(baseline.get('status', 'unknown')))}</li>")
+        if drift:
+            items.append(f"<li><strong>Drift</strong>: {escape(str(drift.get('status', 'unknown')))}</li>")
+        for issue in audit:
+            items.append(f"<li><strong>Audit</strong>: {escape(str(issue.get('message', issue.get('id'))))}</li>")
+        for check in checks:
+            items.append(f"<li><strong>CI {escape(str(check.get('status')))}</strong>: {escape(str(check.get('message')))}</li>")
+
+        heatmap_html = ""
+        cells = heatmap.get("cells") if isinstance(heatmap, dict) else None
+        if cells:
+            heatmap_html = (
+                '<div class="heatmap">'
+                + "".join(
+                    f'<div class="heat-cell {escape(str(cell.get("status", "")))}" data-segment="{escape(str(cell.get("segment_index", "")))}" title="{escape("; ".join(cell.get("details", []) or cell.get("labels", [])))}">{escape(str(cell.get("segment_index", "")))}</div>'
+                    for cell in cells
+                    if isinstance(cell, dict)
+                )
+                + "</div>"
+            )
+        if not items and not heatmap_html:
+            return ""
+        return (
+            '<section class="notes"><h3>Insights Workbench</h3>'
+            + '<ul class="insight-list">'
+            + "".join(items)
+            + "</ul>"
+            + heatmap_html
+            + "</section>"
+        )
 
     def _render_group(self, group: str, metrics: list[MetricResult]) -> str:
         status = _group_status(metrics)
@@ -766,6 +931,27 @@ class MarkdownReporter:
                     f"- Fingerprint: `{_md_escape(result.provenance.runtime_fingerprint or 'unavailable')}`",
                 ]
             )
+        if result.insights:
+            lines.extend(["", "### Insights", ""])
+            fingerprint = result.insights.get("quality_fingerprint", {}).get("signature")
+            if fingerprint:
+                lines.append(f"- Fingerprint: `{_md_escape(fingerprint)}`")
+            for label in result.insights.get("defect_labels", []):
+                lines.append(
+                    f"- Label `{_md_escape(label.get('id', 'unknown'))}`: {_md_escape(label.get('evidence', ''))}"
+                )
+            for suggestion in result.insights.get("repair_suggestions", []):
+                lines.append(f"- Suggestion: {_md_escape(suggestion)}")
+            baseline = result.insights.get("baseline_comparison", {})
+            if baseline:
+                lines.append(f"- Baseline: `{_md_escape(baseline.get('status', 'unknown'))}`")
+            drift = result.insights.get("drift_monitor", {})
+            if drift:
+                lines.append(f"- Drift: `{_md_escape(drift.get('status', 'unknown'))}`")
+            for issue in result.insights.get("dataset_audit", []):
+                lines.append(f"- Audit: {_md_escape(issue.get('message', issue.get('id', '')))}")
+            for check in result.insights.get("ci_checks", []):
+                lines.append(f"- CI `{_md_escape(check.get('status', 'unknown'))}`: {_md_escape(check.get('message', ''))}")
         groups = result.metrics_by_group()
         ordered = [group for group in GROUP_ORDER if group in groups]
         ordered += [group for group in groups if group not in ordered]
@@ -833,6 +1019,7 @@ class CsvReporter:
             "provenance_backend",
             "provenance_runtime",
             "runtime_fingerprint",
+            "insights",
             "error",
         ] + all_metric_names
         writer = csv.DictWriter(buf, fieldnames=fieldnames)
@@ -866,6 +1053,7 @@ class CsvReporter:
                 "provenance_backend": r.provenance.compute_backend if r.provenance else "",
                 "provenance_runtime": r.provenance.model_runtime if r.provenance else "",
                 "runtime_fingerprint": r.provenance.runtime_fingerprint if r.provenance else "",
+                "insights": json.dumps(_sanitize_for_json(r.insights), ensure_ascii=False, sort_keys=True) if r.insights else "",
                 "error": r.error or "",
             }
             metric_lookup = {m.name: m.value for m in r.metrics}

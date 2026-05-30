@@ -119,6 +119,7 @@ class FileResult:
     diagnostics: list[DiagnosticEntry] = field(default_factory=list)
     group_health: list[GroupHealth] = field(default_factory=list)
     provenance: Optional[ProvenanceInfo] = None
+    insights: dict[str, Any] = field(default_factory=dict)
     error: Optional[str] = None
     duration_s: float = 0.0
     sample_rate: int = 0
@@ -154,6 +155,7 @@ class FileResult:
             "diagnostics": [diagnostic.to_dict() for diagnostic in self.diagnostics],
             "group_health": [health.to_dict() for health in self.group_health],
             "provenance": self.provenance.to_dict() if self.provenance is not None else None,
+            "insights": self.insights,
             "error": self.error,
             "metrics": [
                 {

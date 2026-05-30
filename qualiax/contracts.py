@@ -86,6 +86,36 @@ _METRIC_SCHEMA = {
     "additionalProperties": False,
 }
 
+INSIGHTS_SCHEMA = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://qualiax.dev/schema/insights.json",
+    "title": "qualiax insights payload",
+    "type": "object",
+    "required": [
+        "version",
+        "quality_fingerprint",
+        "defect_labels",
+        "repair_suggestions",
+        "ci_checks",
+        "triage",
+    ],
+    "properties": {
+        "version": {"type": "string"},
+        "quality_fingerprint": {"type": "object"},
+        "defect_labels": {"type": "array", "items": {"type": "object"}},
+        "repair_suggestions": {"type": "array", "items": {"type": "string"}},
+        "mos_explanation": {"type": "array", "items": {"type": "object"}},
+        "baseline_comparison": {"type": "object"},
+        "drift_monitor": {"type": "object"},
+        "dataset_audit": {"type": "array", "items": {"type": "object"}},
+        "ci_checks": {"type": "array", "items": {"type": "object"}},
+        "segment_heatmap": {"type": "object"},
+        "triage": {"type": "object"},
+        "snippets": {"type": "array", "items": {"type": "object"}},
+    },
+    "additionalProperties": False,
+}
+
 REPORT_ITEM_SCHEMA = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "$id": "https://qualiax.dev/schema/report-item.json",
@@ -103,6 +133,7 @@ REPORT_ITEM_SCHEMA = {
         "diagnostics",
         "group_health",
         "provenance",
+        "insights",
         "error",
         "metrics",
     ],
@@ -126,6 +157,7 @@ REPORT_ITEM_SCHEMA = {
         "diagnostics": {"type": "array", "items": _DIAGNOSTIC_SCHEMA},
         "group_health": {"type": "array", "items": _GROUP_HEALTH_SCHEMA},
         "provenance": _PROVENANCE_SCHEMA,
+        "insights": {"type": "object"},
         "error": {"type": ["string", "null"]},
         "metrics": {"type": "array", "items": _METRIC_SCHEMA},
     },
@@ -153,6 +185,7 @@ SCORECARD_SCHEMA = {
         "status_counts": {"type": "object"},
         "confidence_notes": {"type": "array", "items": {"type": "string"}},
         "metric_rollups": {"type": "array", "items": {"type": "object"}},
+        "insight_summary": {"type": "object"},
     },
     "additionalProperties": False,
 }
@@ -163,6 +196,7 @@ def get_json_schema(name: str) -> dict:
         "report": REPORT_SCHEMA,
         "report_item": REPORT_ITEM_SCHEMA,
         "scorecard": SCORECARD_SCHEMA,
+        "insights": INSIGHTS_SCHEMA,
     }
     key = name.strip().lower()
     if key not in schemas:

@@ -3,12 +3,12 @@ Public Python API for qualiax.
 """
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 from typing import Iterable, Sequence, Union
 
 from .analyzer import AudioAnalyzer
 from .discovery import collect_requested_files
+from .insights import enrich_results
 from .metrics import available_metric_groups
 from .models import FileResult
 from .presets import get_preset
@@ -29,6 +29,14 @@ def analyze(
     segment_seconds: float | None = None,
     strict: bool = True,
     include_demographics: bool = False,
+    insights: bool = False,
+    baseline: PathLike | None = None,
+    ci: bool = False,
+    drift: bool = False,
+    drift_state: PathLike | None = None,
+    fingerprint_sensitivity: str = "balanced",
+    fingerprint_weights: dict[str, float] | None = None,
+    insight_rules: PathLike | None = None,
 ) -> AnalysisResult:
     """Analyze one or more paths and always return a list of FileResult objects."""
     files = collect_requested_files(_normalize_paths(paths))
@@ -52,6 +60,18 @@ def analyze(
     results = analyzer.analyze_all(files)
     if selected_preset is not None:
         apply_threshold_rules(results, list(selected_preset.rules))
+    if insights:
+        enrich_results(
+            results,
+            baseline_path=baseline,
+            ci=ci,
+            drift=drift,
+            drift_state_path=drift_state,
+            fingerprint_sensitivity=fingerprint_sensitivity,
+            fingerprint_weights=fingerprint_weights,
+            preset=preset,
+            insight_rules_path=insight_rules,
+        )
     return results
 
 
@@ -66,6 +86,14 @@ async def analyze_async(
     segment_seconds: float | None = None,
     strict: bool = True,
     include_demographics: bool = False,
+    insights: bool = False,
+    baseline: PathLike | None = None,
+    ci: bool = False,
+    drift: bool = False,
+    drift_state: PathLike | None = None,
+    fingerprint_sensitivity: str = "balanced",
+    fingerprint_weights: dict[str, float] | None = None,
+    insight_rules: PathLike | None = None,
 ) -> AnalysisResult:
     """Asynchronously analyze one or more paths and return a list of FileResult objects."""
     files = collect_requested_files(_normalize_paths(paths))
@@ -88,6 +116,18 @@ async def analyze_async(
     results = await analyzer.analyze_all_async(files)
     if selected_preset is not None:
         apply_threshold_rules(results, list(selected_preset.rules))
+    if insights:
+        enrich_results(
+            results,
+            baseline_path=baseline,
+            ci=ci,
+            drift=drift,
+            drift_state_path=drift_state,
+            fingerprint_sensitivity=fingerprint_sensitivity,
+            fingerprint_weights=fingerprint_weights,
+            preset=preset,
+            insight_rules_path=insight_rules,
+        )
     return results
 
 
@@ -102,6 +142,14 @@ def analyze_one(
     segment_seconds: float | None = None,
     strict: bool = True,
     include_demographics: bool = False,
+    insights: bool = False,
+    baseline: PathLike | None = None,
+    ci: bool = False,
+    drift: bool = False,
+    drift_state: PathLike | None = None,
+    fingerprint_sensitivity: str = "balanced",
+    fingerprint_weights: dict[str, float] | None = None,
+    insight_rules: PathLike | None = None,
 ) -> FileResult:
     """Analyze exactly one requested path and always return a single FileResult."""
     results = analyze(
@@ -114,6 +162,14 @@ def analyze_one(
         segment_seconds=segment_seconds,
         strict=strict,
         include_demographics=include_demographics,
+        insights=insights,
+        baseline=baseline,
+        ci=ci,
+        drift=drift,
+        drift_state=drift_state,
+        fingerprint_sensitivity=fingerprint_sensitivity,
+        fingerprint_weights=fingerprint_weights,
+        insight_rules=insight_rules,
     )
     if len(results) != 1:
         raise ValueError("analyze_one() expected exactly one result.")
@@ -131,6 +187,14 @@ def analyze_many(
     segment_seconds: float | None = None,
     strict: bool = True,
     include_demographics: bool = False,
+    insights: bool = False,
+    baseline: PathLike | None = None,
+    ci: bool = False,
+    drift: bool = False,
+    drift_state: PathLike | None = None,
+    fingerprint_sensitivity: str = "balanced",
+    fingerprint_weights: dict[str, float] | None = None,
+    insight_rules: PathLike | None = None,
 ) -> list[FileResult]:
     """Analyze one or more paths and always return a list of FileResult objects."""
     return analyze(
@@ -143,6 +207,14 @@ def analyze_many(
         segment_seconds=segment_seconds,
         strict=strict,
         include_demographics=include_demographics,
+        insights=insights,
+        baseline=baseline,
+        ci=ci,
+        drift=drift,
+        drift_state=drift_state,
+        fingerprint_sensitivity=fingerprint_sensitivity,
+        fingerprint_weights=fingerprint_weights,
+        insight_rules=insight_rules,
     )
 
 

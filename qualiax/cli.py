@@ -8,6 +8,7 @@ import tempfile
 import time
 import warnings
 import wave
+import json
 from pathlib import Path
 from queue import Empty, Queue
 from typing import Optional
@@ -18,6 +19,13 @@ import numpy as np
 from .analyzer import AudioAnalyzer
 from .discovery import SUPPORTED_EXTENSIONS, collect_files as _collect_files
 from .diffing import diff_reports, render_diff
+from .insights import (
+    build_insight_summary_payload,
+    enrich_existing_report,
+    enrich_results,
+    export_flagged_segment_snippets,
+    validate_insights_report,
+)
 from .metrics import available_metric_groups
 from .presets import available_presets, get_preset, lint_preset
 from .reporter import ConsoleReporter, JsonReporter, JsonlReporter, CsvReporter, HtmlReporter, MarkdownReporter
@@ -119,6 +127,26 @@ def collect_files(path: Path) -> list[Path]:
               help="Fail the run on unexpected metric-group failures instead of degrading gracefully.")
 @click.option("--include-demographics", is_flag=True,
               help="Include heuristic speaker age/gender estimates in the speaker group.")
+@click.option("--insights", is_flag=True,
+              help="Add composite fingerprints, defect labels, suggestions, drift, audit, CI, and heatmap payloads.")
+@click.option("--baseline", type=click.Path(exists=True), default=None,
+              help="Compare --insights output against a prior JSON report baseline.")
+@click.option("--ci", is_flag=True,
+              help="Add CI-oriented quality gate checks to --insights output.")
+@click.option("--drift", is_flag=True,
+              help="Add sequential drift-monitor comparisons to --insights output.")
+@click.option("--drift-state", type=click.Path(), default=None,
+              help="Persist --drift comparison state across runs or watch sessions.")
+@click.option("--fingerprint-sensitivity",
+              type=click.Choice(["coarse", "balanced", "strict"], case_sensitive=False),
+              default="balanced",
+              help="Quality fingerprint bucket sensitivity for --insights.")
+@click.option("--insight-rules", type=click.Path(exists=True), default=None,
+              help="Custom JSON/TOML rules for --insights labels, suggestions, and CI gates.")
+@click.option("--insight-snippets", type=click.Path(), default=None,
+              help="Export WAV snippets for flagged insight segments into this directory.")
+@click.option("--insights-summary", type=click.Path(), default=None,
+              help="Write compact pipeline-oriented insights JSON summary.")
 def main(
     paths: tuple[str, ...],
     silent: bool,
@@ -148,6 +176,15 @@ def main(
     validate_output: bool,
     strict: bool,
     include_demographics: bool,
+    insights: bool,
+    baseline: Optional[str],
+    ci: bool,
+    drift: bool,
+    drift_state: Optional[str],
+    fingerprint_sensitivity: str,
+    insight_rules: Optional[str],
+    insight_snippets: Optional[str],
+    insights_summary: Optional[str],
 ) -> None:
     """
     \b
@@ -173,6 +210,22 @@ def main(
       qualiax diff before.json after.json --format markdown
       qualiax *.wav --metrics basic,loudness,spectral --no-color
     """
+    if paths and paths[0] == "insights":
+        _run_insights_subcommand(
+            args=paths[1:],
+            output=output,
+            silent=silent,
+            force=force,
+            baseline=baseline,
+            ci=ci,
+            drift=drift,
+            drift_state=drift_state,
+            fingerprint_sensitivity=fingerprint_sensitivity,
+            preset=preset,
+            insight_rules=insight_rules,
+        )
+        return
+
     if paths and paths[0] == "diff":
         if (
             segment_seconds is not None
@@ -187,9 +240,18 @@ def main(
             or mic_sample_rate != 16_000
             or lint_rules
             or validate_output
+            or insights
+            or baseline
+            or ci
+            or drift
+            or drift_state
+            or fingerprint_sensitivity != "balanced"
+            or insight_rules
+            or insight_snippets
+            or insights_summary
         ):
             raise click.UsageError(
-                "diff mode does not support segment, microphone, watch, lint, or validation options."
+                "diff mode does not support segment, microphone, watch, lint, validation, or insights options."
             )
         _run_diff(
             diff_args=paths[1:],
@@ -209,6 +271,15 @@ def main(
             validate_output=validate_output,
             strict=strict,
             include_demographics=include_demographics,
+            insights=insights,
+            baseline=baseline,
+            ci=ci,
+            drift=drift,
+            drift_state=drift_state,
+            fingerprint_sensitivity=fingerprint_sensitivity,
+            insight_rules=insight_rules,
+            insight_snippets=insight_snippets,
+            insights_summary=insights_summary,
         )
         return
 
@@ -259,10 +330,12 @@ def main(
             sys.exit(1)
 
     try:
-        if silent and not output and not save_sidecar and not scorecard:
-            raise click.UsageError("--silent requires --output, --scorecard, or --save-sidecar.")
+        if silent and not output and not save_sidecar and not scorecard and not insights_summary:
+            raise click.UsageError("--silent requires --output, --scorecard, or --save-sidecar (or --insights-summary).")
         if _paths_conflict(output, scorecard):
             raise click.UsageError("--output and --scorecard must point to different paths.")
+        if _paths_conflict(output, insights_summary) or _paths_conflict(scorecard, insights_summary):
+            raise click.UsageError("--insights-summary must point to a different path than --output or --scorecard.")
 
         if save_sidecar and not force:
             existing = [str(p.with_suffix(".json")) for p in all_files if p.with_suffix(".json").exists()]
@@ -413,6 +486,26 @@ def main(
             if not silent:
                 click.echo(f"Scorecard written to {scorecard_path}", err=True)
 
+        def _write_insights_summary(render_results, *, allow_overwrite: bool) -> None:
+            if not insights_summary:
+                return
+            summary_path = Path(insights_summary)
+            if summary_path.exists() and not allow_overwrite:
+                raise click.ClickException(
+                    f"Refusing to overwrite existing insights summary without --force: {summary_path}"
+                )
+            summary_path.write_text(
+                json.dumps(
+                    build_insight_summary_payload(render_results),
+                    indent=2,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                ),
+                encoding="utf-8",
+            )
+            if not silent:
+                click.echo(f"Insights summary written to {summary_path}", err=True)
+
         def _render_console(batch_results) -> None:
             if silent:
                 return
@@ -424,6 +517,12 @@ def main(
             if any(result.error for result in batch_results):
                 return 1
             if violations:
+                return 2
+            if any(
+                check.get("status") == "fail"
+                for result in batch_results
+                for check in result.insights.get("ci_checks", [])
+            ):
                 return 2
             return 0
 
@@ -489,12 +588,26 @@ def main(
                             watch_backoff=watch_backoff,
                         )
                         aggregate_results.extend(batch_results)
+                        if insights:
+                            enrich_results(
+                                aggregate_results,
+                                baseline_path=baseline,
+                                ci=ci,
+                                drift=drift,
+                                drift_state_path=drift_state,
+                                fingerprint_sensitivity=fingerprint_sensitivity,
+                                preset=preset,
+                                insight_rules_path=insight_rules,
+                            )
+                            if insight_snippets:
+                                export_flagged_segment_snippets(aggregate_results, insight_snippets)
                         _write_sidecars(batch_results, allow_overwrite=force)
                         if out_fmt == "jsonl":
                             _write_output(batch_results, allow_overwrite=True, append=True)
                         else:
                             _write_output(aggregate_results, allow_overwrite=True)
                         _write_scorecard(aggregate_results, allow_overwrite=True)
+                        _write_insights_summary(aggregate_results, allow_overwrite=True)
                         _render_console(batch_results)
                         batch_exit = _batch_exit_code(batch_results, violations)
                         if batch_exit == 1:
@@ -517,9 +630,23 @@ def main(
             unmatched_behavior="violation" if user_rule_defs else "ignore",
         )
         violations = preset_violations + user_violations
+        if insights:
+            enrich_results(
+                results,
+                baseline_path=baseline,
+                ci=ci,
+                drift=drift,
+                drift_state_path=drift_state,
+                fingerprint_sensitivity=fingerprint_sensitivity,
+                preset=preset,
+                insight_rules_path=insight_rules,
+            )
+            if insight_snippets:
+                export_flagged_segment_snippets(results, insight_snippets)
         _write_sidecars(results, allow_overwrite=force)
         _write_output(results, allow_overwrite=force)
         _write_scorecard(results, allow_overwrite=force)
+        _write_insights_summary(results, allow_overwrite=force)
         _render_console(results)
         sys.exit(_batch_exit_code(results, violations))
     finally:
@@ -590,6 +717,54 @@ def _make_reporter(fmt: str, color: bool):
     return ConsoleReporter(color=color)
 
 
+def _run_insights_subcommand(
+    args: tuple[str, ...],
+    *,
+    output: Optional[str],
+    silent: bool,
+    force: bool,
+    baseline: Optional[str],
+    ci: bool,
+    drift: bool,
+    drift_state: Optional[str],
+    fingerprint_sensitivity: str,
+    preset: Optional[str],
+    insight_rules: Optional[str],
+) -> None:
+    if args and args[0] == "validate":
+        if len(args) != 2:
+            raise click.UsageError("Usage: qualiax insights validate REPORT.json")
+        issues = validate_insights_report(Path(args[1]))
+        for issue in issues:
+            click.echo(f"[error] {issue.path}: {issue.message}", err=True)
+        sys.exit(2 if issues else 0)
+    if len(args) != 1:
+        raise click.UsageError("Usage: qualiax insights REPORT.json --output ENRICHED.json")
+    if not output:
+        raise click.UsageError("qualiax insights requires --output.")
+    input_path = Path(args[0])
+    output_path = Path(output)
+    if not input_path.exists():
+        raise click.ClickException(f"Report not found: {input_path}")
+    if output_path.exists() and not force:
+        raise click.ClickException(
+            f"Refusing to overwrite existing output file without --force: {output_path}"
+        )
+    enrich_existing_report(
+        input_path,
+        output_path,
+        baseline_path=baseline,
+        ci=ci,
+        drift=drift,
+        drift_state_path=drift_state,
+        fingerprint_sensitivity=fingerprint_sensitivity,
+        preset=preset,
+        insight_rules_path=insight_rules,
+    )
+    if not silent:
+        click.echo(f"Insights written to {output_path}", err=True)
+
+
 def _run_diff(
     diff_args: tuple[str, ...],
     silent: bool,
@@ -608,6 +783,15 @@ def _run_diff(
     validate_output: bool,
     strict: bool,
     include_demographics: bool,
+    insights: bool,
+    baseline: Optional[str],
+    ci: bool,
+    drift: bool,
+    drift_state: Optional[str],
+    fingerprint_sensitivity: str,
+    insight_rules: Optional[str],
+    insight_snippets: Optional[str],
+    insights_summary: Optional[str],
 ) -> None:
     if (
         save_sidecar
@@ -621,6 +805,15 @@ def _run_diff(
         or validate_output
         or strict
         or include_demographics
+        or insights
+        or baseline
+        or ci
+        or drift
+        or drift_state
+        or fingerprint_sensitivity != "balanced"
+        or insight_rules
+        or insight_snippets
+        or insights_summary
     ):
         raise click.UsageError("diff mode only supports --output, --format, --silent, --force, and --no-color.")
     if len(diff_args) != 2:
