@@ -181,3 +181,84 @@ Make qualiax easier to trust, automate, and run continuously in production-style
 - **Hardened watch ingestion** — add debounce windows, retry/backoff, bounded queue policy, and explicit dropped-file reporting for long-running watch jobs
 - **Rule/profile validation** — tighten presets and threshold-rule configs with stronger unmatched-name handling, dry-run linting, and clearer failure modes
 - **Model/runtime provenance** — expose model asset versions, backend/runtime details, and calibration fingerprints in outputs for reproducibility
+
+---
+
+## v0.12.0 — Calibration Lab — Released 2026-09-18
+
+- Per-label precision, recall, F1, support, and macro calibration reports
+- Confidence intervals for benchmark samples
+- Cross-codec and cross-variant consistency checks with explicit tolerances
+
+---
+
+## v0.13.0 — Dataset Intelligence — Released 2026-09-18
+
+- Near-duplicate grouping from quality fingerprints
+- Train/validation/test leakage detection
+- Speaker, content-type, and defect-label distribution summaries
+- Label-mismatch risks and prioritized remediation plans
+
+---
+
+## v0.14.0 — Operational Monitoring — Released 2026-09-18
+
+- Persistent bounded drift history and rolling metric windows
+- Cooldown-based alert suppression and JSON webhook delivery
+- Prometheus text exposition for numeric quality metrics
+
+---
+
+## v0.15.0 — Safe Repair — Released 2026-09-18
+
+- Defect-aware ffmpeg repair plans for noise, clipping, and loudness issues
+- Source-overwrite protection and dry-run-first execution
+- Before/after metric evaluation with explicit improvements and regressions
+
+---
+
+## v0.16.0 — Plugin Ecosystem — Released 2026-09-18
+
+- Versioned plugin API for custom label providers and report renderers
+- Python entry-point discovery
+- Failure isolation and a built-in conformance report
+
+---
+
+## v0.17.0 — Composite Quality Control — Released 2026-09-18
+
+- Quality fingerprints, defect labels, repair suggestions, drift checks, and CI gates
+- Enrichment for existing reports plus compact pipeline summaries
+- Flagged-segment snippet export and insight contract validation
+
+---
+
+## v0.18.0 — Review Workbench — Released 2026-09-18
+
+- Persistent per-file and per-segment reviewer annotations
+- Accept, reject, and needs-review decisions with reviewer attribution
+- Portable JSON review-state export for downstream workflows
+
+---
+
+## v0.19.0 — Scale & Performance — Released 2026-09-18
+
+- File-backed analysis cache with source-signature invalidation
+- Incremental source selection and bounded audio chunk iteration
+- Performance-regression budgets and executor-compatible distributed adapters
+
+---
+
+## v0.20.0 — Compatibility Hardening — Released 2026-09-18
+
+- Report migration registry and current-schema normalization
+- Stable automation exit-code enum and structured deprecation warnings
+- Model-asset checksum locks and verification
+
+---
+
+## v1.0.0 — Stable Quality Platform — Released 2026-09-18
+
+- Stable top-level Python API for the complete quality workflow
+- Release-readiness gates, dependency inventory, and reproducibility manifests
+- Python 3.9-3.12 support matrix and production/stable package metadata

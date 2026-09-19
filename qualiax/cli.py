@@ -27,6 +27,7 @@ from .insights import (
     validate_insights_report,
 )
 from .metrics import available_metric_groups
+from .migrations import ExitCode
 from .presets import available_presets, get_preset, lint_preset
 from .reporter import ConsoleReporter, JsonReporter, JsonlReporter, CsvReporter, HtmlReporter, MarkdownReporter
 from .rules import apply_threshold_rules, lint_threshold_rules, load_threshold_rules
@@ -327,7 +328,7 @@ def main(
 
         if not all_files:
             click.echo("[error] No supported audio files found.", err=True)
-            sys.exit(1)
+            sys.exit(ExitCode.INVALID_INPUT)
 
     try:
         if silent and not output and not save_sidecar and not scorecard and not insights_summary:
@@ -384,7 +385,7 @@ def main(
             for issue in issues:
                 label = "error" if issue.level == "error" else "warn"
                 click.echo(f"[{label}] {issue.message}", err=True)
-            sys.exit(2 if any(issue.level == "error" for issue in issues) else 0)
+            sys.exit(ExitCode.QUALITY_GATE_FAILED if any(issue.level == "error" for issue in issues) else ExitCode.OK)
         error_lints = [issue for issue in preset_lints + user_rule_lints if issue.level == "error"]
         if error_lints:
             raise click.ClickException(error_lints[0].message)
@@ -737,7 +738,7 @@ def _run_insights_subcommand(
         issues = validate_insights_report(Path(args[1]))
         for issue in issues:
             click.echo(f"[error] {issue.path}: {issue.message}", err=True)
-        sys.exit(2 if issues else 0)
+        sys.exit(ExitCode.CONTRACT_VIOLATION if issues else ExitCode.OK)
     if len(args) != 1:
         raise click.UsageError("Usage: qualiax insights REPORT.json --output ENRICHED.json")
     if not output:

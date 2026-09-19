@@ -581,6 +581,46 @@ issues = validate_report_payload(results_json_payload)
 assert not issues
 ```
 
+### Quality Workflow API
+
+The 1.0 API also exposes calibration, dataset auditing, operational telemetry, safe repair,
+review state, caching, migrations, plugins, and release qualification as composable helpers:
+
+```python
+from qualiax import (
+    AnalysisCache,
+    ReviewStore,
+    audit_dataset,
+    build_repair_plan,
+    prometheus_metrics,
+    release_readiness,
+)
+
+results = analyze("./calls", preset="call-center-qa", insights=True)
+audit = audit_dataset(results, expected_content_type="speech")
+metrics_text = prometheus_metrics(results)
+plan = build_repair_plan(results[0], output_path="repaired/call.wav")
+
+reviews = ReviewStore("reviews.json")
+reviews.decide(results[0].path, "needs-review", reviewer="qa-team")
+
+cache = AnalysisCache(".qualiax-cache")
+cache.put(results[0].source_file, results[0].to_dict())
+
+gate = release_readiness(
+    version="1.0.0",
+    tests_passed=True,
+    schemas_valid=True,
+    docs_present=True,
+    supported_python=("3.9", "3.10", "3.11", "3.12"),
+)
+```
+
+Repair plans default to dry-run execution, never overwrite the source, and can be evaluated
+against a second analysis with `evaluate_repair(...)`. `PluginManager` discovers versioned
+entry-point plugins while isolating provider failures. `migrate_report(...)` normalizes older
+report objects to the current contract, and `ExitCode` provides stable values for automation.
+
 ---
 
 ## Metric Groups
