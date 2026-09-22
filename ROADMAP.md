@@ -262,3 +262,38 @@ Make qualiax easier to trust, automate, and run continuously in production-style
 - Stable top-level Python API for the complete quality workflow
 - Release-readiness gates, dependency inventory, and reproducibility manifests
 - Python 3.9-3.12 support matrix and production/stable package metadata
+
+---
+
+## v1.1.0 — First PyPI Release — Planned
+
+- **Post-1.0 hardening** ([#1](https://github.com/TheColby/qualiax/pull/1)) — BS.1770 loudness correction (double −0.691 dB offset, stereo channel summing), known-answer metric tests, roadmap-module gaps closed, and `--insights` verified end to end on a defect corpus
+- **Version bump to 1.1.0** — behavior changes and new public exports since 1.0.0
+- **First PyPI release** — `pip install qualiax` via Trusted Publishing (`release.yml`)
+- **Docs catch-up** — document the post-1.0 behavior changes; move README math to fenced `math` blocks so equations don't render as raw TeX on PyPI
+
+---
+
+## v1.2.0 — Consistency & Open Decisions — Planned
+
+- **Exit codes match `ExitCode`** — usage errors no longer share `QUALITY_GATE_FAILED` (2); `--validate-output` failures return `CONTRACT_VIOLATION` (4); analysis failures return `ANALYSIS_FAILED` (3)
+- **Cepstral Peak Prominence in true dB** — so the breathiness index discriminates between voices (it currently reads ≈0.95 for every input)
+- **P.563 proxy retune** — stop scoring clean low-pitched speech at the MOS floor
+- **Plugins compose with `--insights`** — plugin labels survive enrichment and feed triage and CI gates
+- **Analysis cache wired in** — `AnalysisCache` used by `analyze()` and exposed as a CLI option
+- **Resolve cut candidates** — keep or remove `LocalExecutorAdapter` / `DistributedAdapter`, `RollingMetricWindow`, and `release_readiness`
+
+---
+
+## v1.3.0 — Proxy Validation & Model Assets — Planned
+
+- **Proxy benchmarks** — measure the DNSMOS, AECMOS, and MOS proxies against the official models on a public speech-quality corpus and publish error bars
+- **Model downloads** — fetch ONNX model assets with checksum locks (building on the v0.20 asset locks)
+- **Evidence-based trust labels** — update confidence labels and calibration notes from the measured proxy error
+
+---
+
+## v1.4.0 — Web UI — Planned
+
+- **Browser analysis** — drag-and-drop a file and get the HTML report, no local Python install
+- **Hosted demo** — a public instance for trying qualiax before installing it
