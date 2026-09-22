@@ -335,6 +335,65 @@ def test_export_flagged_segment_snippets_writes_wav_and_links_heatmap(tmp_path):
     assert results[0].insights["segment_heatmap"]["cells"][0]["snippet"].endswith(".wav")
 
 
+def test_snippets_from_same_stem_in_different_dirs_do_not_collide(tmp_path):
+    results = []
+    for folder in ("a", "b"):
+        (tmp_path / folder).mkdir()
+        source = tmp_path / folder / "call.wav"
+        _write_wav(source, seconds=2.0)
+        results.append(
+            _result(
+                f"{source} [segment 1/2]",
+                [MetricResult(name="SNR", value=7.0, unit="dB", group="noise")],
+                segment_index=1,
+                source_file=str(source),
+            )
+        )
+    enrich_results(results)
+
+    snippets = export_flagged_segment_snippets(results, tmp_path / "snippets", overwrite=False)
+
+    paths = {snippet["path"] for snippet in snippets}
+    assert len(paths) == 2
+    assert all(Path(path).exists() for path in paths)
+
+
+def test_derived_clipping_ratio_requires_full_scale_flag():
+    def clip_result(flag: int) -> FileResult:
+        # 800 near-peak samples in 1 s at 16 kHz = 5%; only clipping if the peak hit full scale.
+        return _result(
+            "tone.wav",
+            [
+                MetricResult(name="Near-Clipped Samples", value=800, unit="samples", group="noise"),
+                MetricResult(name="Clipping Detected", value=flag, group="basic"),
+            ],
+        )
+
+    loud_sine, clipped = clip_result(0), clip_result(1)
+    enrich_results([loud_sine, clipped])
+
+    assert loud_sine.insights["quality_fingerprint"]["features"]["noise.clipping_ratio"] == 0.0
+    assert not loud_sine.insights["defect_labels"]
+    assert clipped.insights["quality_fingerprint"]["features"]["noise.clipping_ratio"] == 0.05
+    assert [label["id"] for label in clipped.insights["defect_labels"]] == ["hard_clipping"]
+
+
+def test_insight_inputs_reject_rules_that_always_fire_and_empty_baselines(tmp_path):
+    import pytest
+
+    from qualiax.insights import InsightInputError, validate_insight_inputs
+
+    rules = tmp_path / "rules.json"
+    rules.write_text(json.dumps({"labels": [{"feature": "noise.snr", "min": 30, "max": 10, "id": 7}]}))
+    with pytest.raises(InsightInputError, match=r"min > max.*labels\[0\]\.id must be a string"):
+        validate_insight_inputs(insight_rules_path=rules)
+
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(json.dumps([FileResult(path="x.wav", error="unreadable").to_dict()]))
+    with pytest.raises(InsightInputError, match="no metrics insights can compare"):
+        validate_insight_inputs(baseline_path=baseline)
+
+
 def test_compact_summary_payload_contains_only_pipeline_fields():
     results = [_result("bad.wav", [MetricResult(name="SNR", value=7.0, unit="dB", group="noise")])]
     enrich_results(results, ci=True)
@@ -363,9 +422,11 @@ def test_cli_insights_subcommand_enriches_existing_report():
         )
         result = runner.invoke(main, ["insights", "report.json", "--output", "enriched.json", "--silent", "--ci"])
 
-        assert result.exit_code == 0
+        # SNR 8 dB is a blocking noisy_floor label, so the --ci gate fails with exit 2.
+        assert result.exit_code == 2
         payload = json.loads(Path("enriched.json").read_text())
         assert payload[0]["insights"]["quality_fingerprint"]["signature"]
+        assert payload[0]["insights"]["ci_checks"][0]["status"] == "fail"
 
 
 def test_cli_insights_validate_mode_checks_existing_report():
