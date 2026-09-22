@@ -172,4 +172,4 @@ def test_asset_locks_reproducibility_and_public_api(tmp_path):
     asset.write_bytes(b"changed model")
     assert verify_asset_lock(lock)["valid"] is False
     assert qualiax.audit_dataset is audit_dataset
-    assert qualiax.__version__ == "1.2.0"
+    assert qualiax.__version__ == "1.3.0"
