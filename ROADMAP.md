@@ -265,7 +265,7 @@ Make qualiax easier to trust, automate, and run continuously in production-style
 
 ---
 
-## v1.1.0 — First PyPI Release — Planned
+## v1.1.0 — First PyPI Release — Implemented, unreleased
 
 - **Post-1.0 hardening** ([#1](https://github.com/TheColby/qualiax/pull/1)) — BS.1770 loudness correction (double −0.691 dB offset, stereo channel summing), known-answer metric tests, roadmap-module gaps closed, and `--insights` verified end to end on a defect corpus
 - **Version bump to 1.1.0** — behavior changes and new public exports since 1.0.0
@@ -274,14 +274,14 @@ Make qualiax easier to trust, automate, and run continuously in production-style
 
 ---
 
-## v1.2.0 — Consistency & Open Decisions — Planned
+## v1.2.0 — Consistency & Open Decisions — Implemented, unreleased
 
-- **Exit codes match `ExitCode`** — usage errors no longer share `QUALITY_GATE_FAILED` (2); `--validate-output` failures return `CONTRACT_VIOLATION` (4); analysis failures return `ANALYSIS_FAILED` (3)
-- **Cepstral Peak Prominence in true dB** — so the breathiness index discriminates between voices (it currently reads ≈0.95 for every input)
-- **P.563 proxy retune** — stop scoring clean low-pitched speech at the MOS floor
-- **Plugins compose with `--insights`** — plugin labels survive enrichment and feed triage and CI gates
-- **Analysis cache wired in** — `AnalysisCache` used by `analyze()` and exposed as a CLI option
-- **Resolve cut candidates** — keep or remove `LocalExecutorAdapter` / `DistributedAdapter`, `RollingMetricWindow`, and `release_readiness`
+- **Exit codes match `ExitCode`** — usage errors, undecodable audio and invalid rule configs return `INVALID_INPUT` (1) instead of sharing `QUALITY_GATE_FAILED` (2); crashes after the audio loads return `ANALYSIS_FAILED` (3), and `--strict` failures no longer escape as a traceback; `--validate-output` failures return `CONTRACT_VIOLATION` (4); watch mode reports the most severe batch outcome
+- **Cepstral Peak Prominence in true dB** — dB power cepstrum of the dB power spectrum, analysed at 16 kHz; the breathiness index is anchored on measured clean speech (VoiceBank-DEMAND median CPP 19.5 dB) instead of reading ≈0.95 for every input
+- **P.563 proxy retune** — the speech band starts at 80 Hz, so clean low-pitched speech is no longer scored at the MOS floor (sample.wav 1.0 → 3.95); sub-F0 rumble is still penalized
+- **Plugins compose with `--insights`** — `enrich_results(plugins=...)`, `analyze(plugins=...)` and the opt-in `--plugins` flag run label providers so their labels feed repair suggestions, CI gates, and triage; plugin labels survive re-enrichment; `--metrics` accepts plugin-registered groups
+- **Analysis cache wired in** — `analyze(cache=...)` and `--cache DIR` reuse results for unchanged files, keyed by file signature, analysis options, and qualiax version; `FileResult.from_dict()` round-trips results exactly
+- **Cut candidates resolved** — `LocalExecutorAdapter`, `RollingMetricWindow`, and `qualiax.DistributedAdapter` are deprecated for removal in 2.0.0; `release_readiness` stays
 
 ---
 
