@@ -343,9 +343,9 @@ qualiax insights qa.json --output enriched.json --silent
 qualiax insights validate enriched.json
 ```
 
-`--insights` adds a versioned structured `insights` object to each result with a configurable quality fingerprint, human-readable defect labels with severity and metric evidence, repair suggestions, MOS explanations, triage rank, dataset-audit notes, and segment heatmaps when segment metadata is present. `--baseline` compares the current run against a prior JSON report using baseline mean and percentile bands plus baseline provenance, `--drift` compares each result against the previous result in the run or watch stream, and `--drift-state` persists that comparison across sessions. `--ci` adds quality-gate checks that return exit code `2` when they fail.
+`--insights` adds a versioned structured `insights` object to each result with a configurable quality fingerprint, human-readable defect labels with severity and metric evidence, repair suggestions, MOS explanations, triage rank, dataset-audit notes, and segment heatmaps when segment metadata is present. `--baseline` compares the current run against a prior JSON report using baseline mean and percentile bands plus baseline provenance, `--drift` compares each result against the previous result in the run or watch stream, and `--drift-state` persists that comparison across sessions. `--ci` adds quality-gate checks that return exit code `2` when they fail; it requires `--insights`. Built-in defect labels are `noisy_floor`, `clipping_risk`, `hard_clipping`, `under_loud`, `over_loud`, `low_perceptual_quality`, `silence_heavy`, and `dropouts`.
 
-Use `--fingerprint-sensitivity coarse|balanced|strict` to tune fingerprint bucket size. Built-in presets also tune insight label thresholds, so a podcast run treats loudness differently than a music-mastering run. `--insight-rules` accepts JSON/TOML team rules for labels, severity, suggestions, and CI gates. `--insight-snippets` exports short WAV snippets for flagged segments, and `--insights-summary` writes a compact pipeline JSON view with file, fingerprint, labels, CI checks, and triage only. The `qualiax insights` pseudo-subcommand enriches an existing JSON or JSONL report without re-analyzing audio, while `qualiax insights validate` checks existing insight payloads against the insight contract.
+Use `--fingerprint-sensitivity coarse|balanced|strict` to tune fingerprint bucket size. Built-in presets also tune insight label thresholds, so a podcast run treats loudness differently than a music-mastering run. `--insight-rules` accepts JSON/TOML team rules for labels, severity, suggestions, and CI gates. `--insight-snippets` exports short WAV snippets for flagged segments (existing snippet files are only replaced with `--force`), and `--insights-summary` writes a compact pipeline JSON view with file, fingerprint, labels, CI checks, and triage only. The `qualiax insights` pseudo-subcommand enriches an existing JSON or JSONL report without re-analyzing audio, while `qualiax insights validate` checks existing insight payloads against the insight contract. Malformed rule or baseline files are rejected before any audio is analyzed.
 
 ### Task Presets
 
@@ -621,9 +621,23 @@ gate = release_readiness(
 ```
 
 Repair plans default to dry-run execution, never overwrite the source, and can be evaluated
-against a second analysis with `evaluate_repair(...)`. `PluginManager` discovers versioned
-entry-point plugins while isolating provider failures. `migrate_report(...)` normalizes older
-report objects to the current contract, and `ExitCode` provides stable values for automation.
+against a second analysis with `evaluate_repair(...)`. The generated ffmpeg commands use `-n`, so an
+existing output file is only replaced when you opt in with `overwrite_output`. `PluginManager`
+discovers versioned entry-point plugins while isolating provider failures. `migrate_report(...)`
+normalizes older report objects to the current contract and raises `ValueError` for unknown or
+future `schema_version` values.
+
+A few behaviors worth knowing:
+
+- `audit_dataset(...)` can only flag speaker leakage across splits when you pass `speakers=` (and
+  `splits=`), because qualiax has no speaker-identification metric.
+- `ReviewStore` re-reads its file before every write, so several stores can share one file, and it
+  raises instead of silently starting over when the file is corrupt.
+- `benchmark_budget(...)` counts a baseline metric that is missing from the current run as a failure.
+- `AnalysisCache` is a standalone helper: `analyze()` and the CLI don't consult it yet.
+- `ExitCode` provides stable values for automation, but the CLI doesn't use all of them consistently
+  yet: analysis failures exit `1`, and command-line usage errors exit `2`, the same code as a failed
+  quality gate. Both are planned for v1.2.0.
 
 ---
 
