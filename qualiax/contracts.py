@@ -54,8 +54,11 @@ _PROVENANCE_SCHEMA = {
                 "required": ["name", "bytes", "sha256"],
                 "properties": {
                     "name": {"type": "string"},
+                    "file": {"type": "string"},
                     "bytes": {"type": "integer", "minimum": 0},
                     "sha256": {"type": "string"},
+                    "verified": {"type": "boolean"},
+                    "source": {"type": "string"},
                 },
                 "additionalProperties": False,
             },

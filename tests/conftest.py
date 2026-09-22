@@ -133,3 +133,30 @@ def quiet_warnings():
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         yield
+
+
+# The developer's real model cache, captured before any test redirects it.
+from qualiax import assets as _assets  # noqa: E402
+
+_REAL_MODEL_DIR = _assets.model_dir()
+
+
+@pytest.fixture(scope="session")
+def _empty_model_dir(tmp_path_factory):
+    return tmp_path_factory.mktemp("no-models")
+
+
+@pytest.fixture(autouse=True)
+def _no_models_by_default(monkeypatch, _empty_model_dir):
+    """Keep results independent of whatever models happen to be downloaded locally."""
+    monkeypatch.setenv("QUALIAX_MODEL_DIR", str(_empty_model_dir))
+
+
+@pytest.fixture
+def official_dnsmos(monkeypatch):
+    """Use the real, checksum-verified DNSMOS models; skip when they aren't downloaded."""
+    pytest.importorskip("onnxruntime")
+    if any(_assets.asset_status(name, _REAL_MODEL_DIR) != "ok" for name in ("dnsmos-p835", "dnsmos-p808")):
+        pytest.skip("official DNSMOS models not downloaded (run `qualiax models download`)")
+    monkeypatch.setenv("QUALIAX_MODEL_DIR", str(_REAL_MODEL_DIR))
+    return _REAL_MODEL_DIR
