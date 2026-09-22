@@ -125,8 +125,13 @@ def enrich_results(
     preset: str | None = None,
     insight_rules_path: str | Path | None = None,
     plugins: PluginManager | None = None,
+    preserve_drift: bool = False,
 ) -> list[FileResult]:
     """Attach composite insight payloads to file results in place.
+
+    With ``preserve_drift``, results that already carry a drift result keep it and
+    only advance the comparison chain, so re-enriching a growing batch (watch mode)
+    compares each new file with the one before it exactly once.
 
     With ``plugins``, its label providers run alongside the built-in labels, so
     their labels drive repair suggestions, CI gates, and triage. Plugin labels
@@ -169,7 +174,13 @@ def enrich_results(
         if plugins is not None:
             defect_labels.extend(plugins.collect_labels(result)[0])
         baseline_comparison = _baseline_comparison(features, baseline_profile, baseline_meta)
-        drift_monitor = _drift_monitor(features, previous_features) if drift else {}
+        earlier_drift = (result.insights or {}).get("drift_monitor") if preserve_drift else None
+        if not drift:
+            drift_monitor = {}
+        elif earlier_drift:
+            drift_monitor = earlier_drift
+        else:
+            drift_monitor = _drift_monitor(features, previous_features)
         ci_checks = _ci_checks(defect_labels, baseline_comparison, custom_ci_fail) if ci else []
         previous_features = features
         last_features = features
@@ -727,7 +738,8 @@ def _defect_labels(
         severity = "fail" if snr < thresholds["snr_fail"] else "warn"
         labels.append(_label("noisy_floor", severity, 0.95 if severity == "fail" else 0.72, f"SNR is {snr:.1f} dB", metric_lookup.get("noise.snr")))
     if true_peak is not None and true_peak > -1.0:
-        labels.append(_label("clipping_risk", "fail", 0.86, f"true peak is {true_peak:.1f} dBTP", metric_lookup.get("loudness.true_peak")))
+        severity = "fail" if true_peak > 0.0 else "warn"
+        labels.append(_label("clipping_risk", severity, 0.86, f"true peak is {true_peak:.1f} dBTP", metric_lookup.get("loudness.true_peak")))
     if clipping is not None and clipping > 0.005:
         labels.append(_label("hard_clipping", "fail", 0.90, f"clipping ratio is {clipping:.3f}", metric_lookup.get("noise.clipping_ratio")))
     if loudness is not None and loudness < thresholds["lufs_min"]:
@@ -891,34 +903,35 @@ def _baseline_comparison(
             continue
         profile = baseline[name]
         base = profile["mean"]
-        p05 = profile["p05"]
-        p95 = profile["p95"]
-        delta = round(current - base, 4)
-        direction = _direction_for_feature(name)
-        percentile_status = _percentile_status(current, p05, p95)
-        regressed = (
-            percentile_status == "below_band"
-            if direction == "higher"
-            else percentile_status == "above_band"
-        )
+        tolerance = _feature_tolerance(name, base)
+        low, high = profile["p05"] - tolerance, profile["p95"] + tolerance
+        direction = _FEATURE_DIRECTION.get(name, "either")
+        percentile_status = _percentile_status(current, low, high)
+        regressed = {
+            "higher": percentile_status == "below_band",
+            "lower": percentile_status == "above_band",
+        }.get(direction, percentile_status != "within_band")
+        excess = round(max(low - current, current - high, 0.0) / tolerance, 3)
         if regressed:
-            regression_score += abs(delta)
+            regression_score += excess
         comparisons.append(
             {
                 "feature": name,
                 "current": current,
                 "baseline": base,
                 "baseline_mean": base,
-                "baseline_p05": p05,
-                "baseline_p95": p95,
-                "delta": delta,
+                "baseline_p05": profile["p05"],
+                "baseline_p95": profile["p95"],
+                "tolerance": round(tolerance, 4),
+                "delta": round(current - base, 4),
+                "excess": excess,
                 "direction": direction,
                 "percentile_status": percentile_status,
                 "status": "regressed" if regressed else "ok",
             }
         )
     regressions = [item for item in comparisons if item["status"] == "regressed"]
-    regressions.sort(key=lambda item: abs(float(item["delta"])), reverse=True)
+    regressions.sort(key=lambda item: item["excess"], reverse=True)
     return {
         "status": "regressed" if regressions else "ok",
         "baseline": baseline_meta,
@@ -928,18 +941,46 @@ def _baseline_comparison(
     }
 
 
-def _percentile_status(current: float, p05: float, p95: float) -> str:
-    if current < p05:
+def _percentile_status(current: float, low: float, high: float) -> str:
+    if current < low:
         return "below_band"
-    if current > p95:
+    if current > high:
         return "above_band"
     return "within_band"
 
 
-def _direction_for_feature(name: str) -> str:
-    if any(token in name for token in ("true_peak", "clipping", "roughness", "dissonance")):
-        return "lower"
-    return "higher"
+# Which way is worse for each fingerprint feature. Loudness, pitch, brightness and
+# zero-crossing rate have no better direction: a move either way from the baseline counts.
+_FEATURE_DIRECTION = {
+    "noise.snr": "higher",
+    "speech.hnr": "higher",
+    "perceptual.dnsmos_ovrl": "higher",
+    "perceptual.p563_proxy": "higher",
+    "loudness.true_peak": "lower",
+    "noise.clipping_ratio": "lower",
+}
+# The smallest change worth reporting, per feature: absolute in the feature's own
+# unit, or relative to the reference value for Hz-scale and rate features.
+_ABSOLUTE_TOLERANCE = {
+    "noise.snr": 3.0,
+    "loudness.integrated_lufs": 3.0,
+    "loudness.true_peak": 1.0,
+    "speech.hnr": 3.0,
+    "perceptual.dnsmos_ovrl": 0.35,
+    "perceptual.p563_proxy": 0.35,
+    "noise.clipping_ratio": 0.001,
+}
+_RELATIVE_TOLERANCE = {
+    "spectral.centroid": 0.10,
+    "prosody.f0_mean": 0.10,
+    "temporal.zcr": 0.15,
+}
+
+
+def _feature_tolerance(name: str, reference: float) -> float:
+    if name in _RELATIVE_TOLERANCE:
+        return max(abs(reference) * _RELATIVE_TOLERANCE[name], 1e-6)
+    return _ABSOLUTE_TOLERANCE.get(name, 1.0)
 
 
 def _drift_monitor(features: dict[str, float], previous: dict[str, float] | None) -> dict[str, Any]:
@@ -950,18 +991,10 @@ def _drift_monitor(features: dict[str, float], previous: dict[str, float] | None
         if name not in previous:
             continue
         delta = round(current - previous[name], 4)
-        if abs(delta) < _drift_threshold(name):
+        if abs(delta) < _feature_tolerance(name, previous[name]):
             continue
         changes.append({"feature": name, "delta": delta, "previous": previous[name], "current": current})
     return {"status": "drift" if changes else "stable", "changes": changes}
-
-
-def _drift_threshold(name: str) -> float:
-    if "lufs" in name or "snr" in name:
-        return 3.0
-    if "mos" in name or "p563" in name:
-        return 0.35
-    return 1.0
 
 
 def _ci_checks(
