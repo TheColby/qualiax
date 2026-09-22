@@ -179,12 +179,21 @@ def _cue_amplitude_modulation(mono: NDArray, sr: int) -> float:
     Noise is barely modulated.
     """
     try:
-        # Energy envelope via short-time RMS
+        # Energy envelope via short-time RMS of the speech band. Band-limiting
+        # keeps sub-bass rumble (pink/brown noise, HVAC) from producing slow
+        # envelope swings that look syllabic.
+        from scipy.signal import butter, sosfiltfilt
+        hi = min(3400.0, 0.45 * sr)
+        if hi > 300.0 and len(mono) > 64:
+            sos = butter(4, [300.0, hi], btype="bandpass", fs=sr, output="sos")
+            band = sosfiltfilt(sos, np.asarray(mono, dtype=np.float64))
+        else:
+            band = np.asarray(mono, dtype=np.float64)
         frame_len = int(0.025 * sr)
         hop = int(0.005 * sr)
         envelope = np.array([
-            float(np.sqrt(np.mean(mono[i:i + frame_len] ** 2)))
-            for i in range(0, len(mono) - frame_len, hop)
+            float(np.sqrt(np.mean(band[i:i + frame_len] ** 2)))
+            for i in range(0, len(band) - frame_len, hop)
         ])
 
         if len(envelope) < 20:
@@ -207,9 +216,18 @@ def _cue_amplitude_modulation(mono: NDArray, sr: int) -> float:
         total_energy = float(psd[total_mask].sum()) + _eps()
         syl_ratio = syl_energy / total_energy
 
+        # The ratio above is normalised by the envelope's own fluctuation, so the
+        # tiny random ripple of a steady noise or tone can score as "syllabic".
+        # Weight it by the modulation depth: the RMS of the 2–12 Hz envelope
+        # component relative to the mean envelope (a fully modulated syllabic
+        # envelope is ~0.7; steady white noise is ~0.01).
+        syl_rms = math.sqrt(2.0 * syl_energy) / n
+        depth = syl_rms / (float(np.mean(envelope)) + _eps())
+        depth_weight = float(np.clip(depth / 0.15, 0.0, 1.0))
+
         # Speech: syl_ratio typically 0.25–0.65
         # Noise: low (<0.15), Music: variable
-        return float(np.clip((syl_ratio - 0.1) / 0.4, 0.0, 1.0))
+        return float(np.clip((syl_ratio - 0.1) / 0.4, 0.0, 1.0)) * depth_weight
     except Exception as e:
         warnings.warn(f"speech_detector: amplitude modulation cue failed: {e}")
         return 0.5
@@ -323,6 +341,29 @@ def _cue_music_discriminator(mono: NDArray, sr: int) -> float:
         return 0.7
 
 
+def _single_tone_fraction(mono: NDArray, sr: int) -> float:
+    """Fraction of spectral energy within ±3 bins of the strongest spectral peak.
+
+    Close to 1.0 for a lone sinusoid; voiced speech spreads its energy over many
+    harmonics shaped by formants, so a single partial rarely holds most of it.
+    """
+    try:
+        from scipy.signal import stft as scipy_stft
+        _, _, Zxx = scipy_stft(mono, fs=sr, nperseg=1024, noverlap=768)
+        mean_power = (np.abs(Zxx) ** 2).mean(axis=1)
+        total = float(mean_power.sum())
+        if total <= 0:
+            return 0.0
+        k = int(np.argmax(mean_power))
+        return float(mean_power[max(0, k - 3):k + 4].sum() / total)
+    except Exception as e:
+        warnings.warn(f"speech_detector: single-tone check failed: {e}")
+        return 0.0
+
+
+_SINGLE_TONE_THRESHOLD = 0.8
+
+
 def _cue_silence_check(mono: NDArray, sr: int) -> float:
     """Returns 0.0 if file is mostly silence (can't be speech), 1.0 otherwise."""
     rms = float(np.sqrt(np.mean(mono ** 2)))
@@ -400,6 +441,14 @@ def detect_speech(
     c_voice = _cue_voicing_continuity(mono, sr)
     c_nomus = _cue_music_discriminator(mono, sr)
     spf     = _speech_fraction(mono, sr)
+
+    # A lone sinusoid is periodic and low-ZCR, so the pitch and voicing cues
+    # would otherwise vote for speech (a 220 Hz test tone scored 0.63). Without
+    # harmonics there is no voice: withdraw the periodicity evidence.
+    if _single_tone_fraction(mono, sr) >= _SINGLE_TONE_THRESHOLD:
+        c_f0, f0_hz = 0.0, None
+        c_voice = 0.0
+        spf = 0.0
 
     cues = {
         "speech_band_energy": c_band,
