@@ -284,7 +284,7 @@ def test_html_report_exposes_interactive_label_filter_and_heatmap_details():
     assert "location.hash" in html
 
 
-def test_cli_insights_writes_enriched_json(monkeypatch):
+def test_cli_insights_writes_enriched_json(monkeypatch, tmp_path):
     class InsightAnalyzer:
         def __init__(self, *args, **kwargs):
             pass
@@ -305,14 +305,14 @@ def test_cli_insights_writes_enriched_json(monkeypatch):
     runner = CliRunner()
     monkeypatch.setattr("qualiax.cli.AudioAnalyzer", InsightAnalyzer)
 
-    with runner.isolated_filesystem():
-        Path("input.wav").write_bytes(b"audio")
-        result = runner.invoke(main, ["input.wav", "--insights", "--output", "report.json", "--silent"])
+    monkeypatch.chdir(tmp_path)
+    Path("input.wav").write_bytes(b"audio")
+    result = runner.invoke(main, ["input.wav", "--insights", "--output", "report.json", "--silent"])
 
-        assert result.exit_code == 0
-        payload = json.loads(Path("report.json").read_text())
-        assert payload[0]["insights"]["quality_fingerprint"]["signature"]
-        assert payload[0]["insights"]["defect_labels"][0]["id"] == "noisy_floor"
+    assert result.exit_code == 0
+    payload = json.loads(Path("report.json").read_text())
+    assert payload[0]["insights"]["quality_fingerprint"]["signature"]
+    assert payload[0]["insights"]["defect_labels"][0]["id"] == "noisy_floor"
 
 
 def test_export_flagged_segment_snippets_writes_wav_and_links_heatmap(tmp_path):
@@ -406,41 +406,41 @@ def test_compact_summary_payload_contains_only_pipeline_fields():
     assert "metrics" not in summary[0]
 
 
-def test_cli_insights_subcommand_enriches_existing_report():
+def test_cli_insights_subcommand_enriches_existing_report(tmp_path, monkeypatch):
     runner = CliRunner()
 
-    with runner.isolated_filesystem():
-        Path("report.json").write_text(
-            json.dumps(
-                [
-                    FileResult(
-                        path="stored.wav",
-                        metrics=[MetricResult(name="SNR", value=8.0, unit="dB", group="noise")],
-                    ).to_dict()
-                ]
-            )
+    monkeypatch.chdir(tmp_path)
+    Path("report.json").write_text(
+        json.dumps(
+            [
+                FileResult(
+                    path="stored.wav",
+                    metrics=[MetricResult(name="SNR", value=8.0, unit="dB", group="noise")],
+                ).to_dict()
+            ]
         )
-        result = runner.invoke(main, ["insights", "report.json", "--output", "enriched.json", "--silent", "--ci"])
+    )
+    result = runner.invoke(main, ["insights", "report.json", "--output", "enriched.json", "--silent", "--ci"])
 
-        # SNR 8 dB is a blocking noisy_floor label, so the --ci gate fails with exit 2.
-        assert result.exit_code == 2
-        payload = json.loads(Path("enriched.json").read_text())
-        assert payload[0]["insights"]["quality_fingerprint"]["signature"]
-        assert payload[0]["insights"]["ci_checks"][0]["status"] == "fail"
+    # SNR 8 dB is a blocking noisy_floor label, so the --ci gate fails with exit 2.
+    assert result.exit_code == 2
+    payload = json.loads(Path("enriched.json").read_text())
+    assert payload[0]["insights"]["quality_fingerprint"]["signature"]
+    assert payload[0]["insights"]["ci_checks"][0]["status"] == "fail"
 
 
-def test_cli_insights_validate_mode_checks_existing_report():
+def test_cli_insights_validate_mode_checks_existing_report(tmp_path, monkeypatch):
     runner = CliRunner()
 
-    with runner.isolated_filesystem():
-        Path("report.json").write_text(json.dumps([FileResult(path="stored.wav", insights={"defect_labels": []}).to_dict()]))
-        result = runner.invoke(main, ["insights", "validate", "report.json"])
+    monkeypatch.chdir(tmp_path)
+    Path("report.json").write_text(json.dumps([FileResult(path="stored.wav", insights={"defect_labels": []}).to_dict()]))
+    result = runner.invoke(main, ["insights", "validate", "report.json"])
 
-        assert result.exit_code != 0
-        assert "version" in result.output
+    assert result.exit_code != 0
+    assert "version" in result.output
 
 
-def test_cli_can_write_compact_insights_summary(monkeypatch):
+def test_cli_can_write_compact_insights_summary(monkeypatch, tmp_path):
     class InsightAnalyzer:
         def __init__(self, *args, **kwargs):
             pass
@@ -459,24 +459,24 @@ def test_cli_can_write_compact_insights_summary(monkeypatch):
     runner = CliRunner()
     monkeypatch.setattr("qualiax.cli.AudioAnalyzer", InsightAnalyzer)
 
-    with runner.isolated_filesystem():
-        Path("input.wav").write_bytes(b"audio")
-        result = runner.invoke(
-            main,
-            [
-                "input.wav",
-                "--insights",
-                "--insights-summary",
-                "summary.json",
-                "--output",
-                "report.json",
-                "--silent",
-            ],
-        )
+    monkeypatch.chdir(tmp_path)
+    Path("input.wav").write_bytes(b"audio")
+    result = runner.invoke(
+        main,
+        [
+            "input.wav",
+            "--insights",
+            "--insights-summary",
+            "summary.json",
+            "--output",
+            "report.json",
+            "--silent",
+        ],
+    )
 
-        assert result.exit_code == 0
-        payload = json.loads(Path("summary.json").read_text())
-        assert payload[0]["labels"] == ["noisy_floor"]
+    assert result.exit_code == 0
+    payload = json.loads(Path("summary.json").read_text())
+    assert payload[0]["labels"] == ["noisy_floor"]
 
 
 def test_golden_noisy_clipped_fixture_keeps_labels_stable(tmp_path):

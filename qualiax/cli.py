@@ -685,6 +685,7 @@ def main(
                                 ci=ci,
                                 drift=drift,
                                 drift_state_path=drift_state,
+                                preserve_drift=True,
                                 fingerprint_sensitivity=fingerprint_sensitivity,
                                 preset=preset,
                                 insight_rules_path=insight_rules,

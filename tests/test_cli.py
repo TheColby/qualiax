@@ -83,94 +83,94 @@ def test_cli_rejects_missing_input_path():
     assert "Path not found: missing.wav" in result.output
 
 
-def test_cli_rejects_unsupported_input_file(monkeypatch):
+def test_cli_rejects_unsupported_input_file(monkeypatch, tmp_path):
     runner = CliRunner()
     monkeypatch.setattr("qualiax.cli.AudioAnalyzer", DummyAnalyzer)
 
-    with runner.isolated_filesystem():
-        Path("notes.txt").write_text("not audio")
-        result = runner.invoke(main, ["notes.txt"])
+    monkeypatch.chdir(tmp_path)
+    Path("notes.txt").write_text("not audio")
+    result = runner.invoke(main, ["notes.txt"])
 
-        assert result.exit_code != 0
-        assert "Unsupported file type: .txt" in result.output
+    assert result.exit_code != 0
+    assert "Unsupported file type: .txt" in result.output
 
 
-def test_cli_does_not_write_sidecar_by_default(monkeypatch):
+def test_cli_does_not_write_sidecar_by_default(monkeypatch, tmp_path):
     runner = CliRunner()
     monkeypatch.setattr("qualiax.cli.AudioAnalyzer", DummyAnalyzer)
 
-    with runner.isolated_filesystem():
-        Path("input.wav").write_bytes(b"audio")
-        result = runner.invoke(main, ["input.wav"])
+    monkeypatch.chdir(tmp_path)
+    Path("input.wav").write_bytes(b"audio")
+    result = runner.invoke(main, ["input.wav"])
 
-        assert result.exit_code == 0
-        assert not Path("input.json").exists()
+    assert result.exit_code == 0
+    assert not Path("input.json").exists()
 
 
-def test_cli_can_write_sidecar_when_requested(monkeypatch):
+def test_cli_can_write_sidecar_when_requested(monkeypatch, tmp_path):
     runner = CliRunner()
     monkeypatch.setattr("qualiax.cli.AudioAnalyzer", DummyAnalyzer)
 
-    with runner.isolated_filesystem():
-        Path("input.wav").write_bytes(b"audio")
-        result = runner.invoke(main, ["input.wav", "--save-sidecar", "--silent"])
+    monkeypatch.chdir(tmp_path)
+    Path("input.wav").write_bytes(b"audio")
+    result = runner.invoke(main, ["input.wav", "--save-sidecar", "--silent"])
 
-        assert result.exit_code == 0
-        payload = json.loads(Path("input.json").read_text())
-        assert payload[0]["schema_version"] == OUTPUT_SCHEMA_VERSION
+    assert result.exit_code == 0
+    payload = json.loads(Path("input.json").read_text())
+    assert payload[0]["schema_version"] == OUTPUT_SCHEMA_VERSION
 
 
-def test_silent_requires_output_destination(monkeypatch):
+def test_silent_requires_output_destination(monkeypatch, tmp_path):
     runner = CliRunner()
     monkeypatch.setattr("qualiax.cli.AudioAnalyzer", DummyAnalyzer)
 
-    with runner.isolated_filesystem():
-        Path("input.wav").write_bytes(b"audio")
-        result = runner.invoke(main, ["input.wav", "--silent"])
+    monkeypatch.chdir(tmp_path)
+    Path("input.wav").write_bytes(b"audio")
+    result = runner.invoke(main, ["input.wav", "--silent"])
 
-        assert result.exit_code != 0
-        assert "--silent requires --output, --scorecard, or --save-sidecar" in result.output
+    assert result.exit_code != 0
+    assert "--silent requires --output, --scorecard, or --save-sidecar" in result.output
 
 
-def test_output_refuses_to_overwrite_without_force(monkeypatch):
+def test_output_refuses_to_overwrite_without_force(monkeypatch, tmp_path):
     runner = CliRunner()
     monkeypatch.setattr("qualiax.cli.AudioAnalyzer", DummyAnalyzer)
 
-    with runner.isolated_filesystem():
-        Path("input.wav").write_bytes(b"audio")
-        Path("report.json").write_text("{}")
-        result = runner.invoke(main, ["input.wav", "--output", "report.json", "--silent"])
+    monkeypatch.chdir(tmp_path)
+    Path("input.wav").write_bytes(b"audio")
+    Path("report.json").write_text("{}")
+    result = runner.invoke(main, ["input.wav", "--output", "report.json", "--silent"])
 
-        assert result.exit_code != 0
-        assert "Refusing to overwrite existing output file without --force" in result.output
+    assert result.exit_code != 0
+    assert "Refusing to overwrite existing output file without --force" in result.output
 
 
-def test_sidecar_refuses_to_overwrite_without_force(monkeypatch):
+def test_sidecar_refuses_to_overwrite_without_force(monkeypatch, tmp_path):
     runner = CliRunner()
     monkeypatch.setattr("qualiax.cli.AudioAnalyzer", DummyAnalyzer)
 
-    with runner.isolated_filesystem():
-        Path("input.wav").write_bytes(b"audio")
-        Path("input.json").write_text("{}")
-        result = runner.invoke(main, ["input.wav", "--save-sidecar", "--silent"])
+    monkeypatch.chdir(tmp_path)
+    Path("input.wav").write_bytes(b"audio")
+    Path("input.json").write_text("{}")
+    result = runner.invoke(main, ["input.wav", "--save-sidecar", "--silent"])
 
-        assert result.exit_code != 0
-        assert "Refusing to overwrite existing sidecar file(s) without --force" in result.output
+    assert result.exit_code != 0
+    assert "Refusing to overwrite existing sidecar file(s) without --force" in result.output
 
 
-def test_unknown_metric_groups_are_rejected(monkeypatch):
+def test_unknown_metric_groups_are_rejected(monkeypatch, tmp_path):
     runner = CliRunner()
     monkeypatch.setattr("qualiax.cli.AudioAnalyzer", DummyAnalyzer)
 
-    with runner.isolated_filesystem():
-        Path("input.wav").write_bytes(b"audio")
-        result = runner.invoke(main, ["input.wav", "--metrics", "basic,speach"])
+    monkeypatch.chdir(tmp_path)
+    Path("input.wav").write_bytes(b"audio")
+    result = runner.invoke(main, ["input.wav", "--metrics", "basic,speach"])
 
-        assert result.exit_code != 0
-        assert "Unknown metric groups: speach" in result.output
+    assert result.exit_code != 0
+    assert "Unknown metric groups: speach" in result.output
 
 
-def test_cli_preset_applies_default_groups_and_rules(monkeypatch):
+def test_cli_preset_applies_default_groups_and_rules(monkeypatch, tmp_path):
     captured = {}
 
     class PresetAnalyzer:
@@ -209,137 +209,137 @@ def test_cli_preset_applies_default_groups_and_rules(monkeypatch):
     runner = CliRunner()
     monkeypatch.setattr("qualiax.cli.AudioAnalyzer", PresetAnalyzer)
 
-    with runner.isolated_filesystem():
-        Path("input.wav").write_bytes(b"audio")
-        result = runner.invoke(
-            main,
-            ["input.wav", "--preset", "podcast", "--output", "report.json", "--silent"],
-        )
+    monkeypatch.chdir(tmp_path)
+    Path("input.wav").write_bytes(b"audio")
+    result = runner.invoke(
+        main,
+        ["input.wav", "--preset", "podcast", "--output", "report.json", "--silent"],
+    )
 
-        assert result.exit_code == 2
-        assert captured["metric_groups"] == {"basic", "loudness", "speech", "perceptual"}
-        payload = json.loads(Path("report.json").read_text())
-        assert payload[0]["notes"] == ["threshold rules: 2 violation(s)"]
-        assert payload[0]["metrics"][0]["warning"] is not None
-        assert payload[0]["metrics"][1]["warning"] is not None
+    assert result.exit_code == 2
+    assert captured["metric_groups"] == {"basic", "loudness", "speech", "perceptual"}
+    payload = json.loads(Path("report.json").read_text())
+    assert payload[0]["notes"] == ["threshold rules: 2 violation(s)"]
+    assert payload[0]["metrics"][0]["warning"] is not None
+    assert payload[0]["metrics"][1]["warning"] is not None
 
 
-def test_cli_can_write_scorecard(monkeypatch):
+def test_cli_can_write_scorecard(monkeypatch, tmp_path):
     runner = CliRunner()
     monkeypatch.setattr("qualiax.cli.AudioAnalyzer", DummyAnalyzer)
 
-    with runner.isolated_filesystem():
-        Path("input.wav").write_bytes(b"audio")
-        result = runner.invoke(
-            main,
-            ["input.wav", "--output", "report.json", "--scorecard", "scorecard.md", "--silent"],
-        )
+    monkeypatch.chdir(tmp_path)
+    Path("input.wav").write_bytes(b"audio")
+    result = runner.invoke(
+        main,
+        ["input.wav", "--output", "report.json", "--scorecard", "scorecard.md", "--silent"],
+    )
 
-        assert result.exit_code == 0
-        scorecard = Path("scorecard.md").read_text()
-        assert "# qualiax Scorecard" in scorecard
-        assert "| Group | Metric | Count |" in scorecard
+    assert result.exit_code == 0
+    scorecard = Path("scorecard.md").read_text()
+    assert "# qualiax Scorecard" in scorecard
+    assert "| Group | Metric | Count |" in scorecard
 
 
-def test_cli_rejects_shared_output_and_scorecard_paths(monkeypatch):
+def test_cli_rejects_shared_output_and_scorecard_paths(monkeypatch, tmp_path):
     runner = CliRunner()
     monkeypatch.setattr("qualiax.cli.AudioAnalyzer", DummyAnalyzer)
 
-    with runner.isolated_filesystem():
-        Path("input.wav").write_bytes(b"audio")
-        result = runner.invoke(
-            main,
-            ["input.wav", "--output", "report.json", "--scorecard", "report.json", "--silent"],
-        )
+    monkeypatch.chdir(tmp_path)
+    Path("input.wav").write_bytes(b"audio")
+    result = runner.invoke(
+        main,
+        ["input.wav", "--output", "report.json", "--scorecard", "report.json", "--silent"],
+    )
 
-        assert result.exit_code != 0
-        assert "--output and --scorecard must point to different paths" in result.output
+    assert result.exit_code != 0
+    assert "--output and --scorecard must point to different paths" in result.output
 
 
-def test_cli_can_write_html_report(monkeypatch):
+def test_cli_can_write_html_report(monkeypatch, tmp_path):
     runner = CliRunner()
     monkeypatch.setattr("qualiax.cli.AudioAnalyzer", DummyAnalyzer)
 
-    with runner.isolated_filesystem():
-        Path("input.wav").write_bytes(b"audio")
-        result = runner.invoke(main, ["input.wav", "--output", "report.html", "--silent"])
+    monkeypatch.chdir(tmp_path)
+    Path("input.wav").write_bytes(b"audio")
+    result = runner.invoke(main, ["input.wav", "--output", "report.html", "--silent"])
 
-        assert result.exit_code == 0
-        html = Path("report.html").read_text()
-        assert "<!doctype html>" in html.lower()
-        assert "qualiax HTML Report" in html
+    assert result.exit_code == 0
+    html = Path("report.html").read_text()
+    assert "<!doctype html>" in html.lower()
+    assert "qualiax HTML Report" in html
 
 
-def test_cli_can_write_markdown_report(monkeypatch):
+def test_cli_can_write_markdown_report(monkeypatch, tmp_path):
     runner = CliRunner()
     monkeypatch.setattr("qualiax.cli.AudioAnalyzer", DummyAnalyzer)
 
-    with runner.isolated_filesystem():
-        Path("input.wav").write_bytes(b"audio")
-        result = runner.invoke(main, ["input.wav", "--output", "report.md", "--silent"])
+    monkeypatch.chdir(tmp_path)
+    Path("input.wav").write_bytes(b"audio")
+    result = runner.invoke(main, ["input.wav", "--output", "report.md", "--silent"])
 
-        assert result.exit_code == 0
-        report = Path("report.md").read_text()
-        assert "# qualiax Report" in report
-        assert "## `input.wav`" in report
+    assert result.exit_code == 0
+    report = Path("report.md").read_text()
+    assert "# qualiax Report" in report
+    assert "## `input.wav`" in report
 
 
-def test_cli_diff_mode_can_write_markdown_report():
+def test_cli_diff_mode_can_write_markdown_report(tmp_path, monkeypatch):
     runner = CliRunner()
 
-    with runner.isolated_filesystem():
-        Path("before.json").write_text(
-            json.dumps(
-                [
-                    {
-                        "file": "input.wav",
-                        "error": None,
-                        "metrics": [
-                            {
-                                "name": "True Peak",
-                                "group": "loudness",
-                                "value": -2.0,
-                                "unit": "dBTP",
-                                "higher_is_better": False,
-                                "warning": None,
-                            }
-                        ],
-                    }
-                ]
-            )
+    monkeypatch.chdir(tmp_path)
+    Path("before.json").write_text(
+        json.dumps(
+            [
+                {
+                    "file": "input.wav",
+                    "error": None,
+                    "metrics": [
+                        {
+                            "name": "True Peak",
+                            "group": "loudness",
+                            "value": -2.0,
+                            "unit": "dBTP",
+                            "higher_is_better": False,
+                            "warning": None,
+                        }
+                    ],
+                }
+            ]
         )
-        Path("after.json").write_text(
-            json.dumps(
-                [
-                    {
-                        "file": "input.wav",
-                        "error": None,
-                        "metrics": [
-                            {
-                                "name": "True Peak",
-                                "group": "loudness",
-                                "value": -0.1,
-                                "unit": "dBTP",
-                                "higher_is_better": False,
-                                "warning": "Exceeds ceiling",
-                            }
-                        ],
-                    }
-                ]
-            )
+    )
+    Path("after.json").write_text(
+        json.dumps(
+            [
+                {
+                    "file": "input.wav",
+                    "error": None,
+                    "metrics": [
+                        {
+                            "name": "True Peak",
+                            "group": "loudness",
+                            "value": -0.1,
+                            "unit": "dBTP",
+                            "higher_is_better": False,
+                            "warning": "Exceeds ceiling",
+                        }
+                    ],
+                }
+            ]
         )
-        result = runner.invoke(
-            main,
-            ["diff", "before.json", "after.json", "--output", "delta.md", "--silent"],
-        )
+    )
+    result = runner.invoke(
+        main,
+        ["diff", "before.json", "after.json", "--output", "delta.md", "--silent"],
+    )
 
-        assert result.exit_code == 0
-        report = Path("delta.md").read_text()
-        assert "# qualiax Diff Report" in report
-        assert "Regression detected" in report
+    assert result.exit_code == 0
+    report = Path("delta.md").read_text()
+    assert "# qualiax Diff Report" in report
+    assert "Regression detected" in report
 
 
-def test_cli_rules_can_fail_compliance(monkeypatch):
+def test_cli_rules_can_fail_compliance(monkeypatch, tmp_path):
     class RulesAnalyzer(DummyAnalyzer):
         def analyze_all(self, paths, on_progress=None):
             results = super().analyze_all(paths, on_progress=on_progress)
@@ -356,58 +356,58 @@ def test_cli_rules_can_fail_compliance(monkeypatch):
     runner = CliRunner()
     monkeypatch.setattr("qualiax.cli.AudioAnalyzer", RulesAnalyzer)
 
-    with runner.isolated_filesystem():
-        Path("input.wav").write_bytes(b"audio")
-        Path("rules.json").write_text(
-            json.dumps(
-                {
-                    "rules": [
-                        {
-                            "metric": "True Peak",
-                            "group": "loudness",
-                            "max": -1.0,
-                            "message": "Streaming ceiling exceeded",
-                        }
-                    ]
-                }
-            )
+    monkeypatch.chdir(tmp_path)
+    Path("input.wav").write_bytes(b"audio")
+    Path("rules.json").write_text(
+        json.dumps(
+            {
+                "rules": [
+                    {
+                        "metric": "True Peak",
+                        "group": "loudness",
+                        "max": -1.0,
+                        "message": "Streaming ceiling exceeded",
+                    }
+                ]
+            }
         )
-        result = runner.invoke(
-            main,
-            ["input.wav", "--rules", "rules.json", "--output", "report.json", "--silent"],
-        )
+    )
+    result = runner.invoke(
+        main,
+        ["input.wav", "--rules", "rules.json", "--output", "report.json", "--silent"],
+    )
 
-        assert result.exit_code == 2
-        payload = json.loads(Path("report.json").read_text())
-        assert payload[0]["notes"] == ["threshold rules: 1 violation(s)"]
-        assert payload[0]["metrics"][0]["warning"] == "Streaming ceiling exceeded"
+    assert result.exit_code == 2
+    payload = json.loads(Path("report.json").read_text())
+    assert payload[0]["notes"] == ["threshold rules: 1 violation(s)"]
+    assert payload[0]["metrics"][0]["warning"] == "Streaming ceiling exceeded"
 
 
-def test_cli_lint_rules_can_fail_without_inputs():
+def test_cli_lint_rules_can_fail_without_inputs(tmp_path, monkeypatch):
     runner = CliRunner()
 
-    with runner.isolated_filesystem():
-        Path("rules.json").write_text(
-            json.dumps({"rules": [{"metric": "True Peak", "group": "missing-group", "max": -1.0}]})
-        )
-        result = runner.invoke(main, ["--rules", "rules.json", "--lint-rules"])
+    monkeypatch.chdir(tmp_path)
+    Path("rules.json").write_text(
+        json.dumps({"rules": [{"metric": "True Peak", "group": "missing-group", "max": -1.0}]})
+    )
+    result = runner.invoke(main, ["--rules", "rules.json", "--lint-rules"])
 
-        assert result.exit_code == ExitCode.INVALID_INPUT
-        assert "unknown group" in result.output
+    assert result.exit_code == ExitCode.INVALID_INPUT
+    assert "unknown group" in result.output
 
 
-def test_cli_validate_output_checks_json_contract(monkeypatch):
+def test_cli_validate_output_checks_json_contract(monkeypatch, tmp_path):
     runner = CliRunner()
     monkeypatch.setattr("qualiax.cli.AudioAnalyzer", DummyAnalyzer)
 
-    with runner.isolated_filesystem():
-        Path("input.wav").write_bytes(b"audio")
-        result = runner.invoke(main, ["input.wav", "--output", "report.json", "--validate-output", "--silent"])
+    monkeypatch.chdir(tmp_path)
+    Path("input.wav").write_bytes(b"audio")
+    result = runner.invoke(main, ["input.wav", "--output", "report.json", "--validate-output", "--silent"])
 
-        assert result.exit_code == 0
+    assert result.exit_code == 0
 
 
-def test_segmented_sidecar_groups_results_by_source(monkeypatch):
+def test_segmented_sidecar_groups_results_by_source(monkeypatch, tmp_path):
     runner = CliRunner()
 
     class SegmentAnalyzer:
@@ -445,69 +445,69 @@ def test_segmented_sidecar_groups_results_by_source(monkeypatch):
 
     monkeypatch.setattr("qualiax.cli.AudioAnalyzer", SegmentAnalyzer)
 
-    with runner.isolated_filesystem():
-        Path("input.wav").write_bytes(b"audio")
-        result = runner.invoke(
-            main,
-            ["input.wav", "--segment-seconds", "1", "--save-sidecar", "--silent"],
-        )
+    monkeypatch.chdir(tmp_path)
+    Path("input.wav").write_bytes(b"audio")
+    result = runner.invoke(
+        main,
+        ["input.wav", "--segment-seconds", "1", "--save-sidecar", "--silent"],
+    )
 
-        assert result.exit_code == 0
-        payload = json.loads(Path("input.json").read_text())
-        assert len(payload) == 2
-        assert payload[0]["source_file"].endswith("input.wav")
-        assert payload[1]["segment_index"] == 2
+    assert result.exit_code == 0
+    payload = json.loads(Path("input.json").read_text())
+    assert len(payload) == 2
+    assert payload[0]["source_file"].endswith("input.wav")
+    assert payload[1]["segment_index"] == 2
 
 
-def test_cli_can_capture_microphone_input(monkeypatch):
+def test_cli_can_capture_microphone_input(monkeypatch, tmp_path):
     runner = CliRunner()
     monkeypatch.setattr("qualiax.cli.AudioAnalyzer", DummyAnalyzer)
 
-    with runner.isolated_filesystem():
-        def fake_capture(duration_s, sample_rate, *, silent):
-            path = Path("mic.wav")
-            path.write_bytes(b"audio")
-            return path
+    monkeypatch.chdir(tmp_path)
+    def fake_capture(duration_s, sample_rate, *, silent):
+        path = Path("mic.wav")
+        path.write_bytes(b"audio")
+        return path
 
-        monkeypatch.setattr("qualiax.cli._capture_microphone_wav", fake_capture)
-        result = runner.invoke(
-            main,
-            ["--mic-seconds", "1.5", "--output", "mic.json", "--silent"],
-        )
+    monkeypatch.setattr("qualiax.cli._capture_microphone_wav", fake_capture)
+    result = runner.invoke(
+        main,
+        ["--mic-seconds", "1.5", "--output", "mic.json", "--silent"],
+    )
 
-        assert result.exit_code == 0
-        payload = json.loads(Path("mic.json").read_text())
-        assert payload[0]["file"] == "microphone"
+    assert result.exit_code == 0
+    payload = json.loads(Path("mic.json").read_text())
+    assert payload[0]["file"] == "microphone"
 
 
-def test_cli_watch_mode_processes_new_files(monkeypatch):
+def test_cli_watch_mode_processes_new_files(monkeypatch, tmp_path):
     runner = CliRunner()
     monkeypatch.setattr("qualiax.cli.AudioAnalyzer", DummyAnalyzer)
 
-    with runner.isolated_filesystem():
-        incoming = Path("incoming")
-        incoming.mkdir()
-        new_file = incoming / "new.wav"
-        new_file.write_bytes(b"audio")
-        calls = {"count": 0}
+    monkeypatch.chdir(tmp_path)
+    incoming = Path("incoming")
+    incoming.mkdir()
+    new_file = incoming / "new.wav"
+    new_file.write_bytes(b"audio")
+    calls = {"count": 0}
 
-        def fake_collect(path):
-            calls["count"] += 1
-            if calls["count"] == 1:
-                return []
-            return [new_file]
+    def fake_collect(path):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return []
+        return [new_file]
 
-        monkeypatch.setattr("qualiax.cli.collect_files", fake_collect)
-        monkeypatch.setattr("qualiax.cli.time.sleep", lambda _: None)
+    monkeypatch.setattr("qualiax.cli.collect_files", fake_collect)
+    monkeypatch.setattr("qualiax.cli.time.sleep", lambda _: None)
 
-        result = runner.invoke(
-            main,
-            ["incoming", "--watch", "--watch-limit", "1", "--output", "watch.json", "--silent"],
-        )
+    result = runner.invoke(
+        main,
+        ["incoming", "--watch", "--watch-limit", "1", "--output", "watch.json", "--silent"],
+    )
 
-        assert result.exit_code == 0
-        payload = json.loads(Path("watch.json").read_text())
-        assert payload[0]["file"].endswith("new.wav")
+    assert result.exit_code == 0
+    payload = json.loads(Path("watch.json").read_text())
+    assert payload[0]["file"].endswith("new.wav")
 
 
 def test_watch_batches_wait_for_stable_file(monkeypatch, tmp_path):
@@ -561,39 +561,39 @@ def test_watch_batches_reprocess_file_when_signature_changes(monkeypatch, tmp_pa
     assert next(batches) == [target]
 
 
-def test_cli_watch_mode_can_append_jsonl(monkeypatch):
+def test_cli_watch_mode_can_append_jsonl(monkeypatch, tmp_path):
     runner = CliRunner()
     monkeypatch.setattr("qualiax.cli.AudioAnalyzer", DummyAnalyzer)
 
-    with runner.isolated_filesystem():
-        incoming = Path("incoming")
-        incoming.mkdir()
-        first = incoming / "first.wav"
-        second = incoming / "second.wav"
-        calls = {"count": 0}
+    monkeypatch.chdir(tmp_path)
+    incoming = Path("incoming")
+    incoming.mkdir()
+    first = incoming / "first.wav"
+    second = incoming / "second.wav"
+    calls = {"count": 0}
 
-        def fake_watch_batches(watch_dirs, seen, watch_interval, **kwargs):
-            calls["count"] += 1
-            yield [first]
-            yield [second]
+    def fake_watch_batches(watch_dirs, seen, watch_interval, **kwargs):
+        calls["count"] += 1
+        yield [first]
+        yield [second]
 
-        first.write_bytes(b"audio")
-        second.write_bytes(b"audio")
-        monkeypatch.setattr("qualiax.cli._iter_watch_batches", fake_watch_batches)
+    first.write_bytes(b"audio")
+    second.write_bytes(b"audio")
+    monkeypatch.setattr("qualiax.cli._iter_watch_batches", fake_watch_batches)
 
-        result = runner.invoke(
-            main,
-            ["incoming", "--watch", "--watch-limit", "2", "--output", "watch.jsonl", "--silent"],
-        )
+    result = runner.invoke(
+        main,
+        ["incoming", "--watch", "--watch-limit", "2", "--output", "watch.jsonl", "--silent"],
+    )
 
-        assert result.exit_code == 0
-        lines = Path("watch.jsonl").read_text().strip().splitlines()
-        assert len(lines) == 2
-        assert json.loads(lines[0])["file"].endswith("first.wav")
-        assert json.loads(lines[1])["file"].endswith("second.wav")
+    assert result.exit_code == 0
+    lines = Path("watch.jsonl").read_text().strip().splitlines()
+    assert len(lines) == 2
+    assert json.loads(lines[0])["file"].endswith("first.wav")
+    assert json.loads(lines[1])["file"].endswith("second.wav")
 
 
-def test_cli_forwards_strict_and_include_demographics(monkeypatch):
+def test_cli_forwards_strict_and_include_demographics(monkeypatch, tmp_path):
     captured = {}
 
     class CapturingAnalyzer(DummyAnalyzer):
@@ -604,16 +604,16 @@ def test_cli_forwards_strict_and_include_demographics(monkeypatch):
     runner = CliRunner()
     monkeypatch.setattr("qualiax.cli.AudioAnalyzer", CapturingAnalyzer)
 
-    with runner.isolated_filesystem():
-        Path("input.wav").write_bytes(b"audio")
-        result = runner.invoke(
-            main,
-            ["input.wav", "--strict", "--include-demographics", "--output", "report.json", "--silent"],
-        )
+    monkeypatch.chdir(tmp_path)
+    Path("input.wav").write_bytes(b"audio")
+    result = runner.invoke(
+        main,
+        ["input.wav", "--strict", "--include-demographics", "--output", "report.json", "--silent"],
+    )
 
-        assert result.exit_code == 0
-        assert captured["strict"] is True
-        assert captured["include_demographics"] is True
+    assert result.exit_code == 0
+    assert captured["strict"] is True
+    assert captured["include_demographics"] is True
 
 
 def test_finalize_watch_batch_retries_failures_and_marks_successes(tmp_path):
@@ -749,3 +749,19 @@ def test_cli_json_to_stdout_validates_against_contract(tmp_path):
     # Click < 8.2 (the only option on Python 3.9) mixes the stderr progress bar into result.stdout.
     payload = json.loads(result.stdout[result.stdout.index("[\n"):])
     assert validate_report_payload(payload) == []
+
+
+def test_python_dash_m_runs_the_cli():
+    import subprocess
+    import sys
+
+    result = subprocess.run([sys.executable, "-m", "qualiax", "--help"], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.startswith("Usage: qualiax ")
+
+
+def test_readme_lists_every_cli_option():
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+    section = readme[readme.index("### All Options"):readme.index("## Python API")]
+    missing = [opt for param in main.params for opt in param.opts if opt.startswith("--") and opt not in section]
+    assert not missing, f"README 'All Options' is missing {missing}; paste the output of `qualiax --help`"

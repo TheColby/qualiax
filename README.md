@@ -1,6 +1,16 @@
 # qualiax
 
+[![PyPI](https://img.shields.io/pypi/v/qualiax)](https://pypi.org/project/qualiax/)
+[![Python versions](https://img.shields.io/pypi/pyversions/qualiax)](https://pypi.org/project/qualiax/)
+[![CI](https://github.com/TheColby/qualiax/actions/workflows/ci.yml/badge.svg)](https://github.com/TheColby/qualiax/actions/workflows/ci.yml)
+
 Perceptual speech and audio quality analyzer — command-line tool that computes 100+ metrics across 10 analysis groups. Zero required configuration. Point it at a file or folder and get a full quality report.
+
+```bash
+pip install "qualiax[audio,ml]"
+qualiax models download      # optional: Microsoft's DNSMOS models, 1.4 MB
+qualiax recording.wav
+```
 
 ```
 qualiax recording.wav
@@ -16,7 +26,7 @@ qualiax diff before.json after.json --format markdown
 qualiax ./calls/ --insights --baseline baseline.json --ci --output qa.json --silent
 ```
 
-A sample file is included to try immediately:
+A source checkout includes a sample file to try immediately:
 
 ```bash
 qualiax sample.wav
@@ -30,7 +40,7 @@ To save a JSON sidecar next to the file:
 qualiax sample.wav --save-sidecar
 ```
 
-To generate a small set of demo outputs end-to-end:
+From a source checkout, generate a small set of demo outputs end-to-end:
 
 ```bash
 ./demo.sh
@@ -101,13 +111,16 @@ To generate a small set of demo outputs end-to-end:
 - **Threshold rules** — apply metric compliance rules from JSON or TOML and return exit code `2` on violations
 - **Rule/preset linting** — dry-run config validation with `--lint-rules` catches bad groups and contradictory thresholds before a run
 - **Task presets** — built-in analysis profiles for podcasts, call-center QA, speech enhancement, and music mastering
-- **Confidence & calibration notes** — proxy, heuristic, and model-backed caveats now surface in reports and JSON
+- **Official DNSMOS models** — `qualiax models download` fetches Microsoft's DNSMOS P.835 and P.808 models, pinned by SHA-256; scores match Microsoft's reference implementation
+- **Measured trust labels** — every metric says whether it is measured, model-based, a proxy, or a heuristic, and each MOS proxy quotes its benchmarked agreement with the official models ([docs/proxy-benchmark.md](docs/proxy-benchmark.md))
 - **Structured diagnostics & provenance** — machine-readable diagnostics, per-group health, backend/runtime details, and model asset fingerprints are emitted in JSON outputs
 - **Composite QA insights** — optional `--insights` payloads add quality fingerprints, defect labels, repair suggestions, baseline comparison, drift checks, dataset audit notes, CI gates, MOS explanations, and segment heatmaps
 - **Built-in output contracts** — JSON Schema documents plus validation helpers for reports, JSONL streams, and scorecards
 - **Public Python API** — call `analyze(...)`, `analyze_one(...)`, `analyze_many(...)`, or `await analyze_async(...)` and get typed `FileResult` / `MetricResult` objects back
 - **Plugin interface** — register custom metric groups without forking the built-in registry
-- **Optional neural metrics** — use CREPE for F0 and ONNX-backed learned MOS models when available, with proxy fallbacks when they are not
+- **Optional CREPE pitch** — use the CREPE neural F0 tracker when it is installed
+- **Analysis cache** — `--cache DIR` or `analyze(cache=...)` skips files that haven't changed since the last run
+- **Stable exit codes** — `0` OK, `1` invalid input, `2` quality gate failed, `3` analysis failed, `4` contract violation
 - **Color progress bar** — live `[████░░░░] N/total filename` bar during batch analysis
 - **GPU acceleration** — automatically uses CUDA (NVIDIA) or MPS (Apple Silicon) when PyTorch is installed, falls back to CPU silently
 - **Recursive directory analysis** — point at a folder to analyze every audio file in the tree
@@ -133,7 +146,7 @@ pip install qualiax
 # Recommended — adds MP3, FLAC, OGG, AAC support
 pip install "qualiax[audio]"
 
-# Full — stable extras for formats, reports, learned-MOS hooks, watch mode, and microphone capture
+# Full — stable extras for formats, reports, the DNSMOS model runtime, watch mode, and microphone capture
 pip install "qualiax[all]"
 ```
 
@@ -449,39 +462,104 @@ qualiax ./calls/ --workers 4
 ### All Options
 
 ```
-Usage: qualiax [OPTIONS] PATHS...
+Usage: qualiax [OPTIONS] [PATHS]...
 
 Options:
-  --silent                        Suppress console output (useful with --output)
-  --save-sidecar                  Write per-file JSON sidecars next to sources
-  --force                         Allow overwriting existing output files
-  -o, --output PATH               Write results to file (.json, .jsonl, .csv, .html, .md)
+  --silent                        Suppress console output (useful with
+                                  --output).
+  --save-sidecar                  Write per-file JSON sidecars next to each
+                                  analyzed source.
+  --force                         Allow overwriting existing output or sidecar
+                                  files.
+  -o, --output PATH               Write results to a file (format determined
+                                  by extension: .json, .jsonl, .csv, .html,
+                                  .md).
   -f, --format [pretty|json|jsonl|csv|html|markdown]
-                                  Output format (default: pretty)
-  -r, --reference PATH            Reference audio for intrusive metrics
-  -m, --metrics TEXT              Comma-separated metric groups (default: all)
-  --no-color                      Disable colored output
-  -v, --verbose                   Show analysis progress and warnings
-  -w, --workers INTEGER           Parallel worker threads (default: 1)
-  --preset [podcast|call-center-qa|speech-enhancement|music-mastering]
-                                  Built-in analysis preset
-  --scorecard PATH                Write an aggregate scorecard (.json, .html, .md)
-  --rules PATH                    Threshold rules config (.json or .toml)
+                                  Output format (default: pretty).
+  -r, --reference PATH            Reference audio file for intrusive metrics
+                                  (PESQ, STOI, SI-SDR, etc.).
+  -m, --metrics TEXT              Comma-separated list of metric groups to
+                                  include. Groups: basic, loudness, spectral,
+                                  temporal, noise, speech, perceptual,
+                                  prosody, psychoacoustic, speaker, all.
+                                  Default: all.
+  --no-color                      Disable colored output.
+  -v, --verbose                   Show analysis progress and warnings.
+  -w, --workers INTEGER           Number of parallel worker threads (default:
+                                  1).
+  --preset [call-center-qa|music-mastering|podcast|speech-enhancement]
+                                  Built-in analysis preset: podcast, call-
+                                  center-qa, speech-enhancement, music-
+                                  mastering.
+  --scorecard PATH                Write an aggregate scorecard (.json, .html,
+                                  .md) for the analyzed batch.
+  --rules PATH                    Threshold rules config (.json or .toml).
+                                  Metric violations return exit code 2.
   --lint-rules                    Validate preset/rule configuration and exit
+                                  without analyzing audio.
   --segment-seconds FLOAT         Split each input into fixed-length segments
-  --mic-seconds FLOAT             Capture microphone input for N seconds
-  --mic-sample-rate INTEGER       Microphone capture sample rate
-  --watch                         Watch directories for new audio files
-  --watch-interval FLOAT          Polling interval for --watch
-  --watch-limit INTEGER           Stop --watch after N new files
-  --watch-debounce FLOAT          Stable time before watch analysis
-  --watch-retries INTEGER         Retry count for watch failures
-  --watch-backoff FLOAT           Base backoff between watch retries
-  --watch-max-pending INTEGER     Max pending watch candidates
-  --validate-output               Validate JSON outputs against built-in schema
-  --strict                        Fail on unexpected metric-group failures
-  --include-demographics          Include heuristic speaker age/gender outputs
-  --help                          Show this message and exit
+                                  before analysis.
+  --mic-seconds FLOAT             Capture microphone input for N seconds and
+                                  analyze it.
+  --mic-sample-rate INTEGER       Microphone capture sample rate for --mic-
+                                  seconds (default: 16000).
+  --watch                         Watch input directories for new audio files
+                                  and analyze them on arrival.
+  --watch-interval FLOAT          Polling interval in seconds for --watch
+                                  (default: 2.0).
+  --watch-limit INTEGER           Stop --watch after this many new files have
+                                  been analyzed.
+  --watch-debounce FLOAT          Seconds a new file must remain stable before
+                                  watch mode analyzes it.
+  --watch-retries INTEGER         Retry count for watch-mode analysis failures
+                                  before dropping a file.
+  --watch-backoff FLOAT           Base backoff in seconds between watch-mode
+                                  retries.
+  --watch-max-pending INTEGER     Maximum number of pending watch candidates
+                                  kept in memory.
+  --validate-output               Validate JSON/JSONL report or scorecard
+                                  outputs against the built-in schema.
+  --strict                        Fail the run on unexpected metric-group
+                                  failures instead of degrading gracefully.
+  --include-demographics          Include heuristic speaker age/gender
+                                  estimates in the speaker group.
+  --insights                      Add composite fingerprints, defect labels,
+                                  suggestions, drift, audit, CI, and heatmap
+                                  payloads.
+  --baseline PATH                 Compare --insights output against a prior
+                                  JSON report baseline.
+  --ci                            Add CI-oriented quality gate checks to
+                                  --insights output.
+  --drift                         Add sequential drift-monitor comparisons to
+                                  --insights output.
+  --drift-state PATH              Persist --drift comparison state across runs
+                                  or watch sessions.
+  --fingerprint-sensitivity [coarse|balanced|strict]
+                                  Quality fingerprint bucket sensitivity for
+                                  --insights.
+  --insight-rules PATH            Custom JSON/TOML rules for --insights
+                                  labels, suggestions, and CI gates.
+  --insight-snippets PATH         Export WAV snippets for flagged insight
+                                  segments into this directory.
+  --insights-summary PATH         Write compact pipeline-oriented insights
+                                  JSON summary.
+  --cache DIRECTORY               Reuse results for unchanged files from this
+                                  cache directory (keyed by file size and
+                                  mtime, analysis options, and qualiax
+                                  version).
+  --plugins                       Discover installed qualiax plugins (entry
+                                  points in 'qualiax.plugins') and run their
+                                  label providers.
+  --help                          Show this message and exit.
+```
+
+Subcommands take the place of `PATHS`:
+
+```
+qualiax diff BEFORE.json AFTER.json            Compare two JSON reports and surface regressions
+qualiax insights REPORT.json --output OUT.json Add --insights payloads to an existing report
+qualiax insights validate REPORT.json          Check insight payloads against the contract
+qualiax models [list|verify|download] [DIR]    Manage the official DNSMOS models (--force re-downloads)
 ```
 
 ---

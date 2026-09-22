@@ -295,6 +295,18 @@ Make qualiax easier to trust, automate, and run continuously in production-style
 
 ---
 
+## v1.3.1 — Streamline & PyPI Release — Implemented, unreleased
+
+- **First PyPI release** — `pip install qualiax`; the release workflow now smoke-tests the installed wheel from outside the checkout (it previously imported the source tree), checks that the proxy calibration data ships, and creates a GitHub release after publishing
+- **`python -m qualiax`** — runs the CLI like the `qualiax` command
+- **Insights baselines and drift** — loudness, pitch, brightness, and zero-crossing rate regress when they move either way from the baseline (they were treated as higher-is-better); per-feature tolerances widen one-file baselines and replace the 1 Hz drift threshold for Hz-scale features; regressions rank by distance outside the band in tolerance units instead of raw mixed-unit deltas
+- **CI gates** — a true peak between −1 and 0 dBTP is now a warning; only overs above 0 dBTP block `--ci`
+- **Watch mode drift** — files analyzed in earlier batches keep their drift result instead of being recompared against later state
+- **Echo proxy** — no longer warns on most clean speech (it averages 3.5 on echo-free recordings); the measured behaviour is in its calibration note
+- **Cleanup** — README quick start for PyPI users, an options reference generated from `--help` and checked by a test, tests moved off Click's deprecated `isolated_filesystem`, and the obsolete root `test_synthetic.py` removed
+
+---
+
 ## v1.4.0 — Web UI — Planned
 
 - **Browser analysis** — drag-and-drop a file and get the HTML report, no local Python install
