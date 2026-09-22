@@ -3,6 +3,8 @@ Data models for qualiax results.
 """
 from __future__ import annotations
 
+import math
+import numbers
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -91,11 +93,18 @@ class MetricResult:
     calibration_note: Optional[str] = None   # caveat about trust / applicability
 
     def formatted_value(self) -> str:
-        if self.value is None:
+        value = self.value
+        if value is None:
             return "N/A"
-        if isinstance(self.value, float):
-            return f"{self.value:.4f}"
-        return str(self.value)
+        if isinstance(value, numbers.Integral):  # int, bool, numpy integers
+            return str(value)
+        if isinstance(value, numbers.Real):  # float, numpy floating
+            number = float(value)
+            if math.isnan(number):
+                # NaN means "undefined"; render it like any other missing value.
+                return "N/A"
+            return f"{number:.4f}"
+        return str(value)
 
     def value_with_unit(self) -> str:
         fv = self.formatted_value()
