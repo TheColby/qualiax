@@ -123,6 +123,7 @@ def default_migration_registry() -> MigrationRegistry:
     for version in ("3.0", "3.1", "3.2", "3.3"):
         registry.register(version, _migrate_3_0_to_3_4)
     registry.register("3.4", _migrate_3_4_to_3_5)
+    registry.register("3.5", _migrate_3_5_to_3_6)
     return registry
 
 
@@ -223,6 +224,13 @@ def _migrate_3_4_to_3_5(item: dict) -> dict:
     migrated = _rename_known_aliases(item)
     migrated.setdefault("insights", {})
     migrated["schema_version"] = "3.5"
+    return migrated
+
+
+def _migrate_3_5_to_3_6(item: dict) -> dict:
+    # 3.6 only added optional provenance.model_assets fields (file, verified, source).
+    migrated = _rename_known_aliases(item)
+    migrated["schema_version"] = "3.6"
     return migrated
 
 

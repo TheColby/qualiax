@@ -235,3 +235,11 @@ def test_distributed_adapter_access_is_deprecated():
     assert "DistributedAdapter" not in qualiax.__all__
     with pytest.raises(AttributeError):
         qualiax.NoSuchThing
+
+
+def test_schema_3_5_reports_migrate_to_3_6():
+    v35 = migrate_report({**_LEGACY_ITEM, "schema_version": "3.4", "tool_version": "1.2.0"})
+    v35["schema_version"] = "3.5"
+    migrated = migrate_report(v35)
+    assert migrated["schema_version"] == OUTPUT_SCHEMA_VERSION == "3.6"
+    assert validate_report_payload([migrated]) == []

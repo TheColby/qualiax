@@ -8,7 +8,10 @@ All groups are registered in METRIC_GROUPS dict at the bottom.
 """
 from __future__ import annotations
 
+import functools
+import json
 import math
+import sys
 import warnings
 from pathlib import Path
 from typing import Callable, Optional
@@ -33,9 +36,60 @@ def _with_trust(
     confidence: str,
     calibration_note: str | None = None,
 ) -> MetricResult:
+    if confidence == "proxy":
+        confidence, calibration_note = _measured_proxy_trust(metric.name, calibration_note)
     metric.confidence = confidence
     metric.calibration_note = calibration_note
     return metric
+
+
+# A proxy keeps the "proxy" label only when the lower 95% bound of its Pearson r
+# against the official model is at least this; otherwise it is "heuristic".
+PROXY_MIN_CORRELATION = 0.7
+
+# Proxies whose agreement with the official models is measured by
+# benchmarks/proxy_benchmark.py; editing any of them makes the packaged
+# calibration stale (tests/test_proxy_calibration.py checks this).
+_BENCHMARKED_PROXY_FUNCTIONS = (
+    "_compute_dnsmos_proxy",
+    "_compute_pseudo_mos",
+    "_compute_p563_proxy",
+    "_compute_learned_mos",
+)
+
+
+@functools.lru_cache(maxsize=1)
+def _proxy_calibration() -> dict:
+    from importlib.resources import files
+
+    try:
+        return json.loads(files("qualiax").joinpath("data/proxy_calibration.json").read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
+def _measured_proxy_trust(name: str, fallback_note: str | None) -> tuple[str, str | None]:
+    calibration = _proxy_calibration()
+    evidence = calibration.get("metrics", {}).get(name)
+    if not evidence:
+        return "proxy", fallback_note
+    low, high = evidence["pearson_ci95"]
+    note = (
+        f"Measured against {evidence['reference']} on the {calibration['corpus']} "
+        f"({calibration['clips']} clips): Pearson r {evidence['pearson']:.2f} (95% CI {low:.2f}–{high:.2f}), "
+        f"mean absolute error {evidence['mae']:.2f}, bias {evidence['bias']:+.2f}. See docs/proxy-benchmark.md."
+    )
+    return ("proxy" if low >= PROXY_MIN_CORRELATION else "heuristic"), note
+
+
+def proxy_code_fingerprint() -> str:
+    """SHA-256 of the benchmarked proxies' source, recorded with each calibration run."""
+    import hashlib
+    import inspect
+
+    module = sys.modules[__name__]
+    source = "\n".join(inspect.getsource(getattr(module, name)) for name in _BENCHMARKED_PROXY_FUNCTIONS)
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()
 
 
 def _db(x: float) -> float:
@@ -1082,82 +1136,84 @@ def _speech_band_snr(mono: NDArray, sr: int, flo=300, fhi=3400) -> Optional[floa
 # GROUP: perceptual  (intrusive: needs reference; non-intrusive otherwise)
 # ─────────────────────────────────────────────────────────────────────────────
 
+_DNSMOS_MODEL_NOTE = (
+    "Official Microsoft DNSMOS weights (microsoft/DNS-Challenge, CC BY 4.0) verified by SHA-256; "
+    "scores match the reference dnsmos_local.py for 16 kHz input."
+)
+
+
+@functools.lru_cache(maxsize=4)
+def _dnsmos_scorer(p835_path: str, p808_path: str | None):
+    from .dnsmos import DnsmosScorer
+
+    return DnsmosScorer(p835_path, p808_path)
+
+
+def _compute_dnsmos_model(mono: NDArray, sr: int) -> list[MetricResult] | None:
+    try:
+        import onnxruntime  # noqa: F401
+    except ImportError:
+        return None
+    from . import assets
+    from .dnsmos import resample_to_16k
+
+    status = assets.asset_status("dnsmos-p835")
+    if status == "missing":
+        return None
+    if status == "checksum_mismatch":
+        warnings.warn(
+            f"DNSMOS model at {assets.asset_path('dnsmos-p835')} does not match its pinned SHA-256; "
+            "using the proxy. Run `qualiax models download --force` to replace it."
+        )
+        return None
+    p808 = assets.verified_asset_path("dnsmos-p808")
+    try:
+        scores = _dnsmos_scorer(str(assets.asset_path("dnsmos-p835")), str(p808) if p808 else None).score(
+            resample_to_16k(mono, sr)
+        )
+    except Exception as e:
+        warnings.warn(f"DNSMOS model inference failed: {e}; using proxy")
+        return None
+    if scores is None:
+        return None
+
+    def model_metric(name, value, description):
+        return _with_trust(
+            MetricResult(name, round(value, 3), "MOS [1–5]", description, "perceptual",
+                         higher_is_better=True, reference_range=(3.5, 5.0)),
+            confidence="model",
+            calibration_note=_DNSMOS_MODEL_NOTE,
+        )
+
+    results = [
+        model_metric("DNSMOS P.835 SIG", scores["SIG"], "Speech signal quality (official DNSMOS P.835 model)"),
+        model_metric("DNSMOS P.835 BAK", scores["BAK"], "Background noise quality (official DNSMOS P.835 model)"),
+        model_metric("DNSMOS P.835 OVRL", scores["OVRL"], "Overall quality (official DNSMOS P.835 model)"),
+    ]
+    if "P808_MOS" in scores:
+        results.append(model_metric("DNSMOS P.808 MOS", scores["P808_MOS"], "Overall MOS (official DNSMOS P.808 model)"))
+    return results
+
+
 def _compute_dnsmos_p835(mono: NDArray, sr: int) -> list[MetricResult]:
     """
-    Microsoft DNSMOS P.835 — try ONNX runtime first, fall back to proxy.
+    Microsoft DNSMOS P.835 (and P.808) with the official ONNX models, else a proxy.
 
-    Real model: https://github.com/microsoft/DNS-Challenge/tree/master/DNSMOS
-    Install: pip install onnxruntime  (+ download model files)
+    The models are used when ``onnxruntime`` is installed and ``qualiax models
+    download`` has fetched files that match their pinned SHA-256 checksums.
 
-    Proxy approach when ONNX unavailable:
-    - SIG  (signal quality): voiced HNR + spectral tilt consistency
+    Proxy approach otherwise:
+    - SIG  (signal quality): spectral SNR + spectral tilt consistency
     - BAK  (background noise): noise floor stationarity + spectral flatness
-    - OVRL (overall):          weighted combination (SIG×0.46 + BAK×0.23 + 0.31)
+    - OVRL (overall):          weighted combination (SIG×0.46 + BAK×0.23 + 0.93)
     """
-    # ── Try real ONNX model ──────────────────────────────────────────────────
-    try:
-        import onnxruntime as ort  # noqa: F401
-        # If models are present alongside this module, run them.
-        # Model files must be named dnsmos_sig.onnx, dnsmos_bak.onnx, dnsmos_ovrl.onnx
-        # and placed in the qualiax package directory.
-        model_dir = Path(__file__).parent
-        sig_path  = model_dir / "dnsmos_sig.onnx"
-        bak_path  = model_dir / "dnsmos_bak.onnx"
-        ovrl_path = model_dir / "dnsmos_ovrl.onnx"
+    model_results = _compute_dnsmos_model(mono, sr)
+    if model_results is not None:
+        return model_results
+    return _compute_dnsmos_proxy(mono, sr)
 
-        if sig_path.exists() and bak_path.exists() and ovrl_path.exists():
-            # Resample to 16 kHz, truncate / zero-pad to 9600 samples (0.6 s)
-            target_sr = 16000
-            if sr != target_sr:
-                audio_16k = _resample(mono, sr, target_sr)
-            else:
-                audio_16k = mono
-            n = 9600
-            if len(audio_16k) >= n:
-                chunk = audio_16k[:n]
-            else:
-                chunk = np.pad(audio_16k, (0, n - len(audio_16k)))
-            chunk = chunk.astype(np.float32)[None, :]  # (1, 9600)
 
-            def _run(path):
-                sess = ort.InferenceSession(str(path),
-                                            providers=["CPUExecutionProvider"])
-                out = sess.run(None, {sess.get_inputs()[0].name: chunk})
-                return float(out[0][0])
-
-            sig  = _run(sig_path)
-            bak  = _run(bak_path)
-            ovrl = _run(ovrl_path)
-
-            return [
-                _with_trust(
-                    MetricResult("DNSMOS P.835 SIG",  round(sig,  3), "MOS [1–5]",
-                                 "Speech signal quality (P.835 ONNX model)", "perceptual",
-                                 higher_is_better=True, reference_range=(3.5, 5.0)),
-                    confidence="model",
-                    calibration_note="DNSMOS requires matching ONNX model files for reproducible calibration.",
-                ),
-                _with_trust(
-                    MetricResult("DNSMOS P.835 BAK",  round(bak,  3), "MOS [1–5]",
-                                 "Background noise quality (P.835 ONNX model)", "perceptual",
-                                 higher_is_better=True, reference_range=(3.5, 5.0)),
-                    confidence="model",
-                    calibration_note="DNSMOS requires matching ONNX model files for reproducible calibration.",
-                ),
-                _with_trust(
-                    MetricResult("DNSMOS P.835 OVRL", round(ovrl, 3), "MOS [1–5]",
-                                 "Overall quality (P.835 ONNX model)", "perceptual",
-                                 higher_is_better=True, reference_range=(3.5, 5.0)),
-                    confidence="model",
-                    calibration_note="DNSMOS requires matching ONNX model files for reproducible calibration.",
-                ),
-            ]
-    except ImportError:
-        pass
-    except Exception as e:
-        warnings.warn(f"DNSMOS ONNX inference failed: {e}; using proxy")
-
-    # ── Proxy ────────────────────────────────────────────────────────────────
+def _compute_dnsmos_proxy(mono: NDArray, sr: int) -> list[MetricResult]:
     try:
         from scipy.signal import stft as scipy_stft
 
@@ -1203,7 +1259,7 @@ def _compute_dnsmos_p835(mono: NDArray, sr: int) -> list[MetricResult]:
         ovrl_score = float(np.clip(sig_score * 0.46 + bak_score * 0.23 + 0.31 * 3.0,
                                    1.0, 5.0))
 
-        proxy_warn = "Proxy (install `onnxruntime` + DNSMOS models for accurate scores)"
+        proxy_warn = "Proxy (install `onnxruntime` and run `qualiax models download` for the official DNSMOS model)"
         return [
             _with_trust(
                 MetricResult("DNSMOS P.835 SIG (proxy)",  round(sig_score,  2), "MOS [1–5]",
@@ -1237,41 +1293,13 @@ def _compute_dnsmos_p835(mono: NDArray, sr: int) -> list[MetricResult]:
 
 def _compute_aecmos(mono: NDArray, sr: int) -> MetricResult:
     """
-    Echo-aware quality score (AECMOS-inspired).
+    Echo-aware quality proxy (AECMOS-inspired).
 
-    Tries ONNX model first; falls back to a signal-domain echo proxy:
+    Microsoft's AECMOS model needs the far-end reference, microphone, and processed
+    signals, so it can't run on a single recording; this is a signal-domain proxy:
     - Estimate echo tail via autocorrelation at 20–300 ms lags
-    - Estimate early reflection energy vs direct sound energy
-    - Map to MOS-like [1–5] score
+    - Map the strongest normalized tail correlation to a MOS-like [1–5] score
     """
-    try:
-        import onnxruntime as ort  # noqa: F401
-        model_path = Path(__file__).parent / "aecmos.onnx"
-        if model_path.exists():
-            target_sr = 16000
-            if sr != target_sr:
-                m16 = _resample(mono, sr, target_sr)
-            else:
-                m16 = mono
-            n = 9600
-            chunk = m16[:n] if len(m16) >= n else np.pad(m16, (0, n - len(m16)))
-            sess = ort.InferenceSession(str(model_path),
-                                        providers=["CPUExecutionProvider"])
-            score = float(sess.run(None, {
-                sess.get_inputs()[0].name: chunk.astype(np.float32)[None, :]
-            })[0][0])
-            return _with_trust(
-                MetricResult("AECMOS", round(score, 3), "MOS [1–5]",
-                            "Echo-aware quality score (ONNX model)", "perceptual",
-                            higher_is_better=True, reference_range=(3.5, 5.0)),
-                confidence="model",
-                calibration_note="AECMOS requires the matching ONNX model file for calibrated scores.",
-            )
-    except ImportError:
-        pass
-    except Exception as e:
-        warnings.warn(f"AECMOS ONNX failed: {e}; using proxy")
-
     # ── Echo proxy ───────────────────────────────────────────────────────────
     try:
         # Normalized autocorrelation: echo appears as peaks at 20–300 ms lags
@@ -1295,7 +1323,7 @@ def _compute_aecmos(mono: NDArray, sr: int) -> MetricResult:
         # echo_strength > 0.3 → noticeable echo
         aecmos_score = float(np.clip(5.0 - echo_strength * 8.0, 1.0, 5.0))
 
-        proxy_warn = "Proxy (install `onnxruntime` + aecmos.onnx for accurate scores)"
+        proxy_warn = "Proxy (Microsoft AECMOS needs far-end and microphone signals, so it cannot run on one recording)"
         return _with_trust(
             MetricResult(
                 "AECMOS (proxy)", round(aecmos_score, 2), "MOS [1–5]",
@@ -1305,8 +1333,11 @@ def _compute_aecmos(mono: NDArray, sr: int) -> MetricResult:
                 reference_range=(3.5, 5.0),
                 warning=proxy_warn if aecmos_score < 4.0 else None,
             ),
-            confidence="proxy",
-            calibration_note="AECMOS proxy values only approximate echo severity and should not be treated as official MOS.",
+            confidence="heuristic",
+            calibration_note=(
+                "Not benchmarked: Microsoft's AECMOS needs far-end, microphone, and processed signals, so no "
+                "single-recording reference exists. Treat this as an echo-severity heuristic."
+            ),
         )
     except Exception as e:
         warnings.warn(f"AECMOS proxy failed: {e}")
@@ -1450,10 +1481,11 @@ def _compute_pseudo_mos(mono: NDArray, sr: int) -> MetricResult:
         return _with_trust(
             MetricResult(
                 "Estimated MOS (non-intrusive proxy)", round(mos, 2), "MOS [1–5]",
-                "Heuristic MOS estimate (SNR + spectral shape). For accurate MOS install `dnsmos`.", "perceptual",
+                "Heuristic MOS estimate (SNR + spectral shape). For model-based MOS run `qualiax models download`.",
+                "perceptual",
                 higher_is_better=True,
                 reference_range=(3.5, 5.0),
-                warning="Note: proxy only — use DNSMOS ONNX model for accurate MOS",
+                warning="Proxy only — the official DNSMOS models give model-based MOS",
             ),
             confidence="proxy",
             calibration_note="Estimated MOS is a heuristic blend and should be used for ranking, not certification.",
@@ -1463,56 +1495,17 @@ def _compute_pseudo_mos(mono: NDArray, sr: int) -> MetricResult:
 
 
 def _compute_learned_mos(mono: NDArray, sr: int) -> list[MetricResult]:
-    """Optional learned-MOS estimators with proxy fallback."""
-    results: list[MetricResult] = []
-    try:
-        import onnxruntime as ort  # noqa: F401
+    """Learned-MOS stand-ins blended from the pseudo-MOS and P.563 proxies.
 
-        target_sr = 16000
-        work = _resample(mono, sr, target_sr) if sr != target_sr else mono
-        n = 16000
-        chunk = work[:n] if len(work) >= n else np.pad(work, (0, n - len(work)))
-        chunk = chunk.astype(np.float32)[None, :]
-        model_specs = [
-            ("UTMOS", "utmos.onnx"),
-            ("SHEET MOS", "sheet.onnx"),
-        ]
-        for name, filename in model_specs:
-            model_path = Path(__file__).parent / filename
-            if not model_path.exists():
-                continue
-            sess = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
-            score = float(sess.run(None, {sess.get_inputs()[0].name: chunk})[0].reshape(-1)[0])
-            results.append(
-                _with_trust(
-                    MetricResult(
-                        name,
-                        round(float(np.clip(score, 1.0, 5.0)), 3),
-                        "MOS [1–5]",
-                        f"Learned MOS estimate from {filename}",
-                        "perceptual",
-                        higher_is_better=True,
-                        reference_range=(3.5, 5.0),
-                    ),
-                    confidence="model",
-                    calibration_note=f"{name} depends on the bundled {filename} weights and runtime backend.",
-                )
-            )
-    except ImportError:
-        pass
-    except Exception as e:
-        warnings.warn(f"Learned MOS ONNX inference failed: {e}; using proxy")
-
-    if results:
-        return results
-
+    No official UTMOS or SHEET ONNX weights exist to pin, so these stay proxies.
+    """
     mos_metric = _compute_pseudo_mos(mono, sr)
     p563_metric = _compute_p563_proxy(mono, sr)
     mos_value = float(mos_metric.value) if mos_metric.value is not None else 3.0
     p563_value = float(p563_metric.value) if p563_metric.value is not None else 3.0
     utmos_proxy = float(np.clip(0.75 * mos_value + 0.25 * (p563_value / 4.5 * 5.0), 1.0, 5.0))
     sheet_proxy = float(np.clip(0.60 * mos_value + 0.40 * (p563_value / 4.5 * 5.0), 1.0, 5.0))
-    proxy_warn = "Proxy (install `onnxruntime` + UTMOS/SHEET model files for learned MOS)"
+    proxy_warn = "Proxy blended from the pseudo-MOS and P.563 proxies; not the UTMOS or SHEET models"
     return [
         _with_trust(
             MetricResult(
@@ -1682,7 +1675,7 @@ def _compute_p563_proxy(mono: NDArray, sr: int) -> MetricResult:
                 "activity continuity, artifact rate, and clipping cues", "perceptual",
                 higher_is_better=True,
                 reference_range=(3.0, 4.5),
-                warning="Proxy only — install `itu-p563` for true P.563",
+                warning="Proxy only — not an ITU-T P.563 implementation",
             ),
             confidence="proxy",
             calibration_note="P.563 proxy is tuned for narrowband speech and should not be interpreted as a true ITU score.",

@@ -27,21 +27,28 @@ def test_no_models_installed(model_dir):
 
 
 def test_model_assets_are_reported_with_digests(model_dir):
-    (model_dir / "dnsmos_sig.onnx").write_bytes(b"sig-weights")
-    (model_dir / "utmos.onnx").write_bytes(b"utmos-weights-v2")
-    (model_dir / "unrelated.onnx").write_bytes(b"ignored")
+    (model_dir / "dnsmos").mkdir()
+    (model_dir / "dnsmos" / "sig_bak_ovr.onnx").write_bytes(b"not-the-real-weights")
+    (model_dir / "dnsmos" / "unrelated.onnx").write_bytes(b"ignored")
 
     info = provenance.build_provenance([])
 
     assert info.model_assets == [
-        {"name": "dnsmos_sig.onnx", "bytes": 11, "sha256": hashlib.sha256(b"sig-weights").hexdigest()[:16]},
-        {"name": "utmos.onnx", "bytes": 16, "sha256": hashlib.sha256(b"utmos-weights-v2").hexdigest()[:16]},
+        {
+            "name": "dnsmos-p835",
+            "file": "dnsmos/sig_bak_ovr.onnx",
+            "bytes": 20,
+            "sha256": hashlib.sha256(b"not-the-real-weights").hexdigest()[:16],
+            "verified": False,
+            "source": provenance.MODEL_ASSETS["dnsmos-p835"].source,
+        }
     ]
-    assert [path.name for path in provenance.model_asset_paths()] == ["dnsmos_sig.onnx", "utmos.onnx"]
+    assert [path.name for path in provenance.model_asset_paths()] == ["sig_bak_ovr.onnx"]
 
 
 def test_fingerprint_tracks_model_changes(model_dir):
-    asset = model_dir / "aecmos.onnx"
+    (model_dir / "dnsmos").mkdir()
+    asset = model_dir / "dnsmos" / "model_v8.onnx"
     asset.write_bytes(b"v1")
     first = provenance.build_provenance([])
     again = provenance.build_provenance([])
@@ -74,16 +81,18 @@ def test_model_runtime_reports_missing_onnxruntime(model_dir, monkeypatch):
 
 
 def test_provenance_satisfies_report_schema(model_dir):
-    (model_dir / "sheet.onnx").write_bytes(b"sheet")
+    (model_dir / "dnsmos").mkdir()
+    (model_dir / "dnsmos" / "model_v8.onnx").write_bytes(b"p808")
     result = FileResult(path="a.wav", provenance=provenance.build_provenance([]))
 
     assert validate_report_payload([result.to_dict()]) == []
 
 
 def test_model_assets_can_be_locked_and_verified(model_dir, tmp_path):
-    (model_dir / "dnsmos_ovrl.onnx").write_bytes(b"ovrl")
+    (model_dir / "dnsmos").mkdir()
+    (model_dir / "dnsmos" / "sig_bak_ovr.onnx").write_bytes(b"ovrl")
     lock = write_asset_lock(provenance.model_asset_paths(), tmp_path / "models.lock", base_dir=model_dir)
 
     assert verify_asset_lock(lock, base_dir=model_dir)["valid"] is True
-    (model_dir / "dnsmos_ovrl.onnx").write_bytes(b"swapped")
+    (model_dir / "dnsmos" / "sig_bak_ovr.onnx").write_bytes(b"swapped")
     assert verify_asset_lock(lock, base_dir=model_dir)["valid"] is False

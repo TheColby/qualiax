@@ -1,0 +1,78 @@
+{
+  "corpus": "VoiceBank-DEMAND test set",
+  "clips": 1648,
+  "qualiax_version": "1.3.0",
+  "proxy_fingerprint": "8e65c25608d7fe4f0749ff8b8f7339281f6a94b3e8862834e9423ac0094550e7",
+  "metrics": {
+    "DNSMOS P.835 SIG (proxy)": {
+      "reference": "DNSMOS P.835 SIG",
+      "pearson": 0.584,
+      "pearson_ci95": [
+        0.5155,
+        0.6434
+      ],
+      "mae": 1.4624,
+      "bias": 1.4623
+    },
+    "DNSMOS P.835 BAK (proxy)": {
+      "reference": "DNSMOS P.835 BAK",
+      "pearson": 0.1645,
+      "pearson_ci95": [
+        0.0983,
+        0.2266
+      ],
+      "mae": 0.6533,
+      "bias": 0.6249
+    },
+    "DNSMOS P.835 OVRL (proxy)": {
+      "reference": "DNSMOS P.835 OVRL",
+      "pearson": 0.6853,
+      "pearson_ci95": [
+        0.6421,
+        0.7239
+      ],
+      "mae": 1.1888,
+      "bias": 1.1888
+    },
+    "Estimated MOS (non-intrusive proxy)": {
+      "reference": "DNSMOS P.808 MOS",
+      "pearson": 0.713,
+      "pearson_ci95": [
+        0.6902,
+        0.7355
+      ],
+      "mae": 0.4181,
+      "bias": -0.014
+    },
+    "P.563 Proxy (NB Quality Estimate)": {
+      "reference": "DNSMOS P.808 MOS",
+      "pearson": 0.4273,
+      "pearson_ci95": [
+        0.3893,
+        0.4639
+      ],
+      "mae": 0.7014,
+      "bias": 0.5009
+    },
+    "UTMOS (proxy)": {
+      "reference": "DNSMOS P.808 MOS",
+      "pearson": 0.6927,
+      "pearson_ci95": [
+        0.6678,
+        0.7158
+      ],
+      "mae": 0.4438,
+      "bias": 0.2197
+    },
+    "SHEET MOS (proxy)": {
+      "reference": "DNSMOS P.808 MOS",
+      "pearson": 0.661,
+      "pearson_ci95": [
+        0.6359,
+        0.6857
+      ],
+      "mae": 0.5371,
+      "bias": 0.3606
+    }
+  }
+}

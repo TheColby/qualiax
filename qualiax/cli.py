@@ -275,6 +275,10 @@ def main(
       qualiax diff before.json after.json --format markdown
       qualiax *.wav --metrics basic,loudness,spectral --no-color
     """
+    if paths and paths[0] == "models":
+        _run_models_subcommand(paths[1:], force=force, silent=silent)
+        return
+
     plugin_manager = _discover_plugins(silent=silent) if use_plugins else None
 
     if paths and paths[0] == "insights":
@@ -760,6 +764,28 @@ def main(
                 temp_path.unlink()
             except FileNotFoundError:
                 pass
+
+
+def _run_models_subcommand(args: tuple[str, ...], *, force: bool, silent: bool) -> None:
+    from . import assets
+
+    action = args[0] if args else "list"
+    if action not in {"list", "verify", "download"} or len(args) > 2:
+        raise click.UsageError("Usage: qualiax models [list|verify|download] [DIR] [--force]")
+    directory = Path(args[1]) if len(args) == 2 else assets.model_dir()
+    if action == "download":
+        try:
+            rows = assets.download_models(directory=directory, force=force)
+        except assets.ModelAssetError as exc:
+            raise click.ClickException(str(exc)) from exc
+    else:
+        rows = assets.verify_models(directory)
+    if not silent:
+        click.echo(f"Model directory: {directory}")
+        for row in rows:
+            click.echo(f"  {row['name']:<13} {row['status']:<18} {row['description']} [{row['license']}, {row['source']}]")
+    if action == "verify" and any(row["status"] != "ok" for row in rows):
+        sys.exit(ExitCode.INVALID_INPUT)
 
 
 def _discover_plugins(*, silent: bool) -> PluginManager:

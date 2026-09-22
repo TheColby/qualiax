@@ -285,11 +285,13 @@ Make qualiax easier to trust, automate, and run continuously in production-style
 
 ---
 
-## v1.3.0 — Proxy Validation & Model Assets — Planned
+## v1.3.0 — Proxy Validation & Model Assets — Implemented, unreleased
 
-- **Proxy benchmarks** — measure the DNSMOS, AECMOS, and MOS proxies against the official models on a public speech-quality corpus and publish error bars
-- **Model downloads** — fetch ONNX model assets with checksum locks (building on the v0.20 asset locks)
-- **Evidence-based trust labels** — update confidence labels and calibration notes from the measured proxy error
+- **Official DNSMOS models** — a numpy port of Microsoft's `dnsmos_local.py` runs the real P.835 (SIG, BAK, OVRL) and P.808 models; scores match the reference exactly on 16 kHz input. The old "model" paths looked for files Microsoft never shipped and could not have worked
+- **Model downloads** — `qualiax models download|verify|list` fetches the models pinned to a DNS-Challenge commit by size and SHA-256 into `$QUALIAX_MODEL_DIR` or `~/.cache/qualiax/models`; mismatched files are refused, and provenance records which verified weights produced each result (output schema 3.6)
+- **Proxy benchmarks** — `benchmarks/proxy_benchmark.py` measures every MOS proxy against the official models on the VoiceBank-DEMAND test set (1,648 clips) with utterance-level bootstrap intervals; results in `docs/proxy-benchmark.md`. No proxy reaches r ≥ 0.7 at the lower 95% bound; the best is Estimated MOS (r 0.71, MAE 0.42), and the BAK proxy does not track the model at all (r 0.16)
+- **Evidence-based trust labels** — each proxy's calibration note quotes its measured agreement, and a proxy is labelled `proxy` only when its correlation clears 0.7 at the lower bound, otherwise `heuristic`; a test fails if a proxy changes without re-running the benchmark
+- **AECMOS scope** — Microsoft's AECMOS needs far-end and microphone signals, so the single-recording echo proxy is labelled `heuristic` and its fake model path is removed (as are the unverifiable UTMOS/SHEET file hooks)
 
 ---
 

@@ -11,19 +11,11 @@ from functools import lru_cache
 from importlib import metadata
 from pathlib import Path
 
+from .assets import MODEL_ASSETS, asset_status, model_dir
 from .models import MetricResult, ProvenanceInfo
 from .version import __version__
 from . import gpu
 
-
-_KNOWN_MODEL_FILES = [
-    "dnsmos_sig.onnx",
-    "dnsmos_bak.onnx",
-    "dnsmos_ovrl.onnx",
-    "aecmos.onnx",
-    "utmos.onnx",
-    "sheet.onnx",
-]
 
 # Libraries whose versions can change metric values. Their versions feed the
 # runtime fingerprint so a dependency upgrade shows up as a provenance change.
@@ -66,13 +58,17 @@ def build_provenance(metrics: list[MetricResult]) -> ProvenanceInfo:
 
 
 def model_asset_paths() -> list[Path]:
-    """Paths of the bundled model files that are installed, e.g. for ``write_asset_lock``."""
+    """Paths of the registered model files that are downloaded, e.g. for ``write_asset_lock``."""
     model_dir = _model_dir()
-    return [model_dir / filename for filename in _KNOWN_MODEL_FILES if (model_dir / filename).is_file()]
+    return [
+        model_dir / asset.relative_path
+        for asset in MODEL_ASSETS.values()
+        if (model_dir / asset.relative_path).is_file()
+    ]
 
 
 def _model_dir() -> Path:
-    return Path(__file__).parent
+    return model_dir()
 
 
 def _detect_model_runtime(metrics: list[MetricResult]) -> str:
@@ -98,16 +94,23 @@ def _library_versions() -> dict[str, str | None]:
 
 
 def _collect_model_assets() -> list[dict[str, object]]:
-    assets: list[dict[str, object]] = []
-    for path in model_asset_paths():
-        assets.append(
+    directory = _model_dir()
+    collected: list[dict[str, object]] = []
+    for asset in MODEL_ASSETS.values():
+        path = directory / asset.relative_path
+        if not path.is_file():
+            continue
+        collected.append(
             {
-                "name": path.name,
+                "name": asset.name,
+                "file": asset.relative_path,
                 "bytes": path.stat().st_size,
                 "sha256": _sha256_prefix(path),
+                "verified": asset_status(asset.name, directory) == "ok",
+                "source": asset.source,
             }
         )
-    return assets
+    return collected
 
 
 def _sha256_prefix(path: Path) -> str:
