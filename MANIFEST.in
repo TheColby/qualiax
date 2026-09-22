@@ -2,6 +2,7 @@
 # run its test suite from an unpacked sdist (tests only need tests/fixtures).
 include LICENSE README.md pyproject.toml
 include qualiax/py.typed
+recursive-include qualiax/data *.json
 recursive-include tests *.py *.json
 
 # Local clutter that must never ship.

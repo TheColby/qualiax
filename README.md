@@ -187,8 +187,8 @@ qualiax sample.wav
 | `perceptual` | `pesq`, `pystoi` | True PESQ P.862 scores, true STOI intelligibility |
 | `live` | `sounddevice` | Live microphone capture mode (`--mic-seconds`) |
 | `watch` | `watchdog` | Event-driven watch mode instead of polling-only directory scans |
-| `ml` | `onnxruntime` | Learned MOS model hooks (UTMOS/SHEET) |
-| `all` | all of the above + `librosa`, `sounddevice`, `watchdog`, `onnxruntime` | Stable full install for format support, microphone capture, event-driven watch mode, and ML hooks |
+| `ml` | `onnxruntime` | Official Microsoft DNSMOS models, after `qualiax models download` |
+| `all` | all of the above + `librosa`, `sounddevice`, `watchdog`, `onnxruntime` | Stable full install for format support, microphone capture, event-driven watch mode, and the DNSMOS models |
 
 **ffmpeg** is required for MP3 and AAC/M4A decoding via pydub:
 
@@ -209,11 +209,15 @@ pip install torch
 pip install sounddevice
 ```
 
-**onnxruntime** is optional and enables learned-MOS inference:
+**Official DNSMOS models.** With `onnxruntime` installed, qualiax runs Microsoft's DNSMOS P.835 and P.808 models instead of its proxies. The model files aren't bundled, so download them once (1.4 MB from [microsoft/DNS-Challenge](https://github.com/microsoft/DNS-Challenge), CC BY 4.0):
 
 ```bash
-pip install onnxruntime
+pip install "qualiax[ml]"
+qualiax models download
+qualiax models verify
 ```
+
+The files go to `$QUALIAX_MODEL_DIR`, or `~/.cache/qualiax/models` by default. Each is pinned to a DNS-Challenge commit by size and SHA-256: a download that doesn't match is refused, and a file that changes later is ignored with a warning (`qualiax models download --force` replaces it). On 16 kHz input the scores match Microsoft's reference `dnsmos_local.py` exactly. Other sample rates go through a fixed Kaiser windowed-sinc resampler, which stays within a median 0.02 MOS of the reference's resampler.
 
 **CREPE** remains supported, but its upstream packaging is brittle on some environments. Install it manually only if you specifically want the neural F0 backend:
 
@@ -1029,15 +1033,18 @@ Where: $`\text{CD}`$ is cepstral distance, $`T`$ is the number of frames, $`c_k(
 
 | Metric | Unit | Notes |
 |--------|------|-------|
-| DNSMOS P.835 SIG / BAK / OVRL | MOS 1–5 | ONNX if model files are present, otherwise speech-quality proxies |
-| AECMOS | MOS 1–5 | Echo-aware quality score via ONNX if available, otherwise autocorrelation proxy |
+| DNSMOS P.835 SIG / BAK / OVRL | MOS 1–5 | Official Microsoft model once downloaded; otherwise a proxy whose name ends in "(proxy)" |
+| DNSMOS P.808 MOS | MOS 1–5 | Official Microsoft P.808 model; only reported when the models are downloaded |
+| AECMOS (proxy) | MOS 1–5 | Echo heuristic from the autocorrelation tail. Microsoft's AECMOS needs far-end and microphone signals, so it can't run on one recording |
 | Estimated MOS (non-intrusive) | 1–5 | Heuristic from SNR and spectral shape |
-| UTMOS / SHEET MOS | MOS 1–5 | ONNX if model files are present, otherwise learned-MOS-style proxies |
+| UTMOS / SHEET MOS (proxy) | MOS 1–5 | Blends of the pseudo-MOS and P.563 proxies, not the UTMOS or SHEET models |
 | Estimated Codec Bandwidth Cutoff | Hz | Heuristic upper bandwidth before codec-style low-pass loss dominates |
 | Spectral Hole Ratio | % | Mid/high-band notch density relative to a smoothed spectral envelope |
 | Pre-echo Risk | — | Transient smear heuristic for codec ringing or pre-echo |
 | Codec Artifact Risk | % | Combined heuristic risk for codec artifacts |
 | P.563 Proxy (NB Quality Estimate) | 1–4.5 | Improved narrowband non-intrusive quality proxy |
+
+**How far to trust the proxies.** Each MOS proxy is measured against the official DNSMOS models on the VoiceBank-DEMAND test set, and the results are in [docs/proxy-benchmark.md](docs/proxy-benchmark.md). Every proxy's `calibration_note` quotes its measured correlation and error. A proxy is labelled `proxy` only when the lower end of the 95% interval for its Pearson correlation with the model is at least 0.7; otherwise it is labelled `heuristic`. On the current benchmark none of them clears that bar: the closest is Estimated MOS (r 0.71, lower bound 0.69, mean absolute error 0.42 MOS), and the DNSMOS BAK proxy doesn't track the model at all, so download the official models whenever MOS numbers matter.
 | PESQ (ITU-T P.862) | MOS-LQO | Requires `--reference`. True P.862 if `pesq` installed |
 | STOI | 0–1 | Requires `--reference`. True STOI if `pystoi` installed |
 | SI-SDR | dB | Requires `--reference` |
@@ -1250,8 +1257,8 @@ Structure:
 ```json
 [
   {
-    "schema_version": "3.4",
-    "tool_version": "0.11.0",
+    "schema_version": "3.6",
+    "tool_version": "1.3.0",
     "file": "recording.wav",
     "source_file": null,
     "segment_index": null,

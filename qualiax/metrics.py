@@ -9,7 +9,9 @@ All groups are registered in METRIC_GROUPS dict at the bottom.
 from __future__ import annotations
 
 import functools
+import json
 import math
+import sys
 import warnings
 from pathlib import Path
 from typing import Callable, Optional
@@ -34,9 +36,60 @@ def _with_trust(
     confidence: str,
     calibration_note: str | None = None,
 ) -> MetricResult:
+    if confidence == "proxy":
+        confidence, calibration_note = _measured_proxy_trust(metric.name, calibration_note)
     metric.confidence = confidence
     metric.calibration_note = calibration_note
     return metric
+
+
+# A proxy keeps the "proxy" label only when the lower 95% bound of its Pearson r
+# against the official model is at least this; otherwise it is "heuristic".
+PROXY_MIN_CORRELATION = 0.7
+
+# Proxies whose agreement with the official models is measured by
+# benchmarks/proxy_benchmark.py; editing any of them makes the packaged
+# calibration stale (tests/test_proxy_calibration.py checks this).
+_BENCHMARKED_PROXY_FUNCTIONS = (
+    "_compute_dnsmos_proxy",
+    "_compute_pseudo_mos",
+    "_compute_p563_proxy",
+    "_compute_learned_mos",
+)
+
+
+@functools.lru_cache(maxsize=1)
+def _proxy_calibration() -> dict:
+    from importlib.resources import files
+
+    try:
+        return json.loads(files("qualiax").joinpath("data/proxy_calibration.json").read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
+def _measured_proxy_trust(name: str, fallback_note: str | None) -> tuple[str, str | None]:
+    calibration = _proxy_calibration()
+    evidence = calibration.get("metrics", {}).get(name)
+    if not evidence:
+        return "proxy", fallback_note
+    low, high = evidence["pearson_ci95"]
+    note = (
+        f"Measured against {evidence['reference']} on the {calibration['corpus']} "
+        f"({calibration['clips']} clips): Pearson r {evidence['pearson']:.2f} (95% CI {low:.2f}–{high:.2f}), "
+        f"mean absolute error {evidence['mae']:.2f}, bias {evidence['bias']:+.2f}. See docs/proxy-benchmark.md."
+    )
+    return ("proxy" if low >= PROXY_MIN_CORRELATION else "heuristic"), note
+
+
+def proxy_code_fingerprint() -> str:
+    """SHA-256 of the benchmarked proxies' source, recorded with each calibration run."""
+    import hashlib
+    import inspect
+
+    module = sys.modules[__name__]
+    source = "\n".join(inspect.getsource(getattr(module, name)) for name in _BENCHMARKED_PROXY_FUNCTIONS)
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()
 
 
 def _db(x: float) -> float:
@@ -1157,8 +1210,10 @@ def _compute_dnsmos_p835(mono: NDArray, sr: int) -> list[MetricResult]:
     model_results = _compute_dnsmos_model(mono, sr)
     if model_results is not None:
         return model_results
+    return _compute_dnsmos_proxy(mono, sr)
 
-    # ── Proxy ────────────────────────────────────────────────────────────────
+
+def _compute_dnsmos_proxy(mono: NDArray, sr: int) -> list[MetricResult]:
     try:
         from scipy.signal import stft as scipy_stft
 
@@ -1278,8 +1333,11 @@ def _compute_aecmos(mono: NDArray, sr: int) -> MetricResult:
                 reference_range=(3.5, 5.0),
                 warning=proxy_warn if aecmos_score < 4.0 else None,
             ),
-            confidence="proxy",
-            calibration_note="AECMOS proxy values only approximate echo severity and should not be treated as official MOS.",
+            confidence="heuristic",
+            calibration_note=(
+                "Not benchmarked: Microsoft's AECMOS needs far-end, microphone, and processed signals, so no "
+                "single-recording reference exists. Treat this as an echo-severity heuristic."
+            ),
         )
     except Exception as e:
         warnings.warn(f"AECMOS proxy failed: {e}")
@@ -1423,10 +1481,11 @@ def _compute_pseudo_mos(mono: NDArray, sr: int) -> MetricResult:
         return _with_trust(
             MetricResult(
                 "Estimated MOS (non-intrusive proxy)", round(mos, 2), "MOS [1–5]",
-                "Heuristic MOS estimate (SNR + spectral shape). For accurate MOS install `dnsmos`.", "perceptual",
+                "Heuristic MOS estimate (SNR + spectral shape). For model-based MOS run `qualiax models download`.",
+                "perceptual",
                 higher_is_better=True,
                 reference_range=(3.5, 5.0),
-                warning="Note: proxy only — use DNSMOS ONNX model for accurate MOS",
+                warning="Proxy only — the official DNSMOS models give model-based MOS",
             ),
             confidence="proxy",
             calibration_note="Estimated MOS is a heuristic blend and should be used for ranking, not certification.",
@@ -1616,7 +1675,7 @@ def _compute_p563_proxy(mono: NDArray, sr: int) -> MetricResult:
                 "activity continuity, artifact rate, and clipping cues", "perceptual",
                 higher_is_better=True,
                 reference_range=(3.0, 4.5),
-                warning="Proxy only — install `itu-p563` for true P.563",
+                warning="Proxy only — not an ITU-T P.563 implementation",
             ),
             confidence="proxy",
             calibration_note="P.563 proxy is tuned for narrowband speech and should not be interpreted as a true ITU score.",

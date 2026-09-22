@@ -97,7 +97,7 @@ where = ["."]
 include = ["qualiax", "qualiax.*"]
 
 [tool.setuptools.package-data]
-qualiax = ["py.typed"]
+qualiax = ["py.typed", "data/*.json"]
 
 [tool.setuptools.dynamic]
 version = { attr = "qualiax.version.__version__" }

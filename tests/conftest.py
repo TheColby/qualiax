@@ -5,6 +5,7 @@ can be derived from first principles (no binary fixtures).
 """
 from __future__ import annotations
 
+import os
 import warnings
 from pathlib import Path
 
@@ -155,8 +156,12 @@ def _no_models_by_default(monkeypatch, _empty_model_dir):
 @pytest.fixture
 def official_dnsmos(monkeypatch):
     """Use the real, checksum-verified DNSMOS models; skip when they aren't downloaded."""
-    pytest.importorskip("onnxruntime")
+    required = bool(os.environ.get("QUALIAX_REQUIRE_MODELS"))
+    try:
+        import onnxruntime  # noqa: F401
+    except ImportError:
+        (pytest.fail if required else pytest.skip)("onnxruntime is not installed")
     if any(_assets.asset_status(name, _REAL_MODEL_DIR) != "ok" for name in ("dnsmos-p835", "dnsmos-p808")):
-        pytest.skip("official DNSMOS models not downloaded (run `qualiax models download`)")
+        (pytest.fail if required else pytest.skip)("official DNSMOS models not downloaded (run `qualiax models download`)")
     monkeypatch.setenv("QUALIAX_MODEL_DIR", str(_REAL_MODEL_DIR))
     return _REAL_MODEL_DIR

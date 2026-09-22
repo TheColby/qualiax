@@ -40,3 +40,30 @@ jobs:
       # sys.path, so the suite runs against the installed package, not the checkout.
       - name: Run tests
         run: pytest
+
+  official-models:
+    name: official DNSMOS models (ubuntu-latest, Python 3.12)
+    runs-on: ubuntu-latest
+    env:
+      QUALIAX_REQUIRE_MODELS: "1"
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install qualiax with onnxruntime
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ".[dev,ml]"
+
+      - name: Download and verify the pinned models
+        run: |
+          qualiax models download
+          qualiax models verify
+
+      - name: Run the model tests
+        run: pytest tests/test_dnsmos.py tests/test_proxy_calibration.py
