@@ -1176,12 +1176,16 @@ Where: $`F_k`$ is the frequency of formant candidate $`k`$, $`BW_k`$ is its band
 **Cepstral Peak Prominence** (Hillenbrand et al. 1994):
 
 ```math
-\text{CPP} = \max_{q \in [q_{\min},\, q_{\max}]} \left[ c[q] - \hat{c}[q] \right]
+c[q] = 10\log_{10} \left\lvert \mathcal{F}^{-1}\left\{ 10\log_{10} \lvert X[k] \rvert^2 \right\} \right\rvert^2
 ```
 
-This equation measures how strongly the dominant cepstral pitch peak rises above its smooth baseline, which is a proxy for periodic voice clarity.
+```math
+\text{CPP} = c[q^\ast] - \hat{c}[q^\ast], \qquad q^\ast = \arg\max_{q \in [1/500\,\text{s},\ 1/60\,\text{s}]} c[q]
+```
 
-Where: $`\text{CPP}`$ is cepstral peak prominence in dB, $`q`$ is quefrency in samples, $`q_{min}`$ and $`q_{max}`$ define the searched quefrency range, $`c[q] = \lvert \mathcal{F}^{-1}\{\log \lvert X \rvert^2\} \rvert`$ is the real cepstrum, and $`\hat{c}[q]`$ is the linear-regression baseline over the pitch-relevant quefrency interval.
+These equations measure how far the cepstral pitch peak rises above the cepstrum's overall trend, which is a proxy for periodic voice clarity.
+
+Where: $`X[k]`$ is the spectrum of a Hann-windowed frame of about 40 ms (analysed at 16 kHz with a 10 ms hop), $`c[q]`$ is the power cepstrum in dB, $`q`$ is quefrency in seconds, the peak search range corresponds to F0 between 60 and 500 Hz, and $`\hat{c}[q]`$ is a least-squares line fitted to $`c[q]`$ over 1–50 ms. $`\text{CPP}`$ is averaged over frames within 30 dB of the loudest frame. The breathiness index is $`B = \min(1, \max(0, (21 - \text{CPP}) / 8))`$, anchored on clean read speech (median CPP 19.5 dB on the VoiceBank-DEMAND test set).
 
 **Gender estimation** (Traunmüller & Eriksson 1995 empirical distributions):
 
@@ -1198,8 +1202,8 @@ Where: $`\text{CPP}`$ is cepstral peak prominence in dB, $`q`$ is quefrency in s
 |--------|------|-------------|
 | F1–F4 Formant Frequency | Hz | Median $`F_k`$ over voiced frames (LPC, $`p = 12`$) |
 | Spectral Tilt | dB/oct | Power spectrum slope 100 Hz – Nyquist. Typical speech: $`-6`$ to $`-12`$ dB/oct |
-| Cepstral Peak Prominence (CPP) | dB | Higher = clearer periodic voice. Above 5 dB = modal; below 3 dB = breathy |
-| Breathiness Index | 0–1 | CPP-derived. 0 = modal voice; 1 = highly breathy |
+| Cepstral Peak Prominence (CPP) | dB | Higher = clearer periodic voice. Clean connected speech is typically 18–21 dB; below 16 dB suggests breathiness or background noise |
+| Breathiness Index | 0–1 | Linear in CPP: 0 at 21 dB or above, 1 at 13 dB or below. Background noise also raises it |
 | Creakiness (Vocal Fry) Ratio | % | Fraction of active frames with autocorrelation peak in 20–80 Hz |
 | Estimated Gender | — | Heuristic from F0 mean. 145–180 Hz = ambiguous overlap zone |
 | Gender Confidence | 0–1 | Distance from overlap zone as proxy for certainty |
