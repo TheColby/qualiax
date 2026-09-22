@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 
+from .insights import INSIGHT_SCHEMA_VERSION
 from .version import OUTPUT_SCHEMA_VERSION
 
 
@@ -100,17 +101,59 @@ INSIGHTS_SCHEMA = {
         "triage",
     ],
     "properties": {
-        "version": {"type": "string"},
-        "quality_fingerprint": {"type": "object"},
-        "defect_labels": {"type": "array", "items": {"type": "object"}},
+        "version": {"type": "string", "const": INSIGHT_SCHEMA_VERSION},
+        "quality_fingerprint": {
+            "type": "object",
+            "required": ["version", "sensitivity", "signature", "features", "buckets"],
+            "properties": {
+                "version": {"type": "integer"},
+                "sensitivity": {"type": "string", "enum": ["coarse", "balanced", "strict"]},
+                "signature": {"type": "string"},
+                "features": {"type": "object"},
+                "buckets": {"type": "object"},
+            },
+        },
+        "defect_labels": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["id", "severity", "confidence", "evidence", "evidence_metrics"],
+                "properties": {
+                    "id": {"type": "string"},
+                    "severity": {"type": "string", "enum": ["info", "warn", "fail"]},
+                    "confidence": {"type": "number"},
+                    "evidence": {"type": "string"},
+                    "evidence_metrics": {"type": "array", "items": {"type": "object"}},
+                },
+            },
+        },
         "repair_suggestions": {"type": "array", "items": {"type": "string"}},
         "mos_explanation": {"type": "array", "items": {"type": "object"}},
         "baseline_comparison": {"type": "object"},
         "drift_monitor": {"type": "object"},
         "dataset_audit": {"type": "array", "items": {"type": "object"}},
-        "ci_checks": {"type": "array", "items": {"type": "object"}},
+        "ci_checks": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["id", "status", "message"],
+                "properties": {
+                    "id": {"type": "string"},
+                    "status": {"type": "string", "enum": ["pass", "fail"]},
+                    "message": {"type": "string"},
+                },
+            },
+        },
         "segment_heatmap": {"type": "object"},
-        "triage": {"type": "object"},
+        "triage": {
+            "type": "object",
+            "required": ["rank", "score", "reasons"],
+            "properties": {
+                "rank": {"type": "integer", "minimum": 1},
+                "score": {"type": "number"},
+                "reasons": {"type": "array", "items": {"type": "string"}},
+            },
+        },
         "snippets": {"type": "array", "items": {"type": "object"}},
     },
     "additionalProperties": False,

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .contracts import REPORT_SCHEMA, SCORECARD_SCHEMA
+from .contracts import INSIGHTS_SCHEMA, REPORT_SCHEMA, SCORECARD_SCHEMA
 
 
 @dataclass(frozen=True)
@@ -23,7 +23,15 @@ def validate_report_payload(payload: Any) -> list[ValidationIssue]:
         return [ValidationIssue(path="$", message="Report payload must be a list.")]
     for index, item in enumerate(payload):
         issues.extend(_validate_required(item, REPORT_SCHEMA["items"], path=f"$[{index}]"))
+        insights = item.get("insights") if isinstance(item, dict) else None
+        if isinstance(insights, dict) and insights:
+            # Non-empty insights (from --insights) must satisfy the insight contract.
+            issues.extend(validate_insight_payload(insights, path=f"$[{index}].insights"))
     return issues
+
+
+def validate_insight_payload(payload: Any, *, path: str = "$") -> list[ValidationIssue]:
+    return _validate_required(payload, INSIGHTS_SCHEMA, path=path)
 
 
 def validate_scorecard_payload(payload: Any) -> list[ValidationIssue]:
