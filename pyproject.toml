@@ -1,15 +1,18 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+# setuptools 77 is the first release that supports PEP 639 SPDX `license`
+# strings and `project.license-files` without deprecation warnings.
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "qualiax"
-version = "1.0.0"
+dynamic = ["version"]
 description = "Perceptual speech and audio quality analyzer CLI"
 readme = "README.md"
 license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.9"
-authors = [{ name = "qualiax" }]
+authors = [{ name = "Colby Leider", email = "colbyleider@gmail.com" }]
 
 keywords = ["audio", "speech", "quality", "MOS", "PESQ", "STOI", "SNR", "EBU R128", "perceptual"]
 
@@ -18,18 +21,23 @@ classifiers = [
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
     "Topic :: Multimedia :: Sound/Audio :: Analysis",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Typing :: Typed",
 ]
 
 dependencies = [
     "click>=8.0",
     "numpy>=1.23",
     "scipy>=1.9",
+    # TOML rule/insight files use the stdlib tomllib on 3.11+.
+    "tomli>=1.1; python_version < '3.11'",
     # Optional but strongly recommended — see extras below
 ]
 
@@ -67,17 +75,32 @@ all = [
     "watchdog>=4.0",
     "onnxruntime>=1.17",
 ]
+# Test / development tooling
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+]
 
 [project.scripts]
 qualiax = "qualiax.cli:main"
 
 [project.urls]
+Homepage = "https://github.com/TheColby/qualiax"
 Repository = "https://github.com/TheColby/qualiax"
 Issues = "https://github.com/TheColby/qualiax/issues"
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["qualiax*"]
-
 [tool.setuptools]
 package-dir = {"" = "."}
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["qualiax", "qualiax.*"]
+
+[tool.setuptools.package-data]
+qualiax = ["py.typed"]
+
+[tool.setuptools.dynamic]
+version = { attr = "qualiax.version.__version__" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
