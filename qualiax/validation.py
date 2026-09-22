@@ -25,13 +25,21 @@ def validate_report_payload(payload: Any) -> list[ValidationIssue]:
         issues.extend(_validate_required(item, REPORT_SCHEMA["items"], path=f"$[{index}]"))
         insights = item.get("insights") if isinstance(item, dict) else None
         if isinstance(insights, dict) and insights:
-            # Non-empty insights (from --insights) must satisfy the insight contract.
-            issues.extend(validate_insight_payload(insights, path=f"$[{index}].insights"))
+            # Only full --insights payloads carry "version"; plugin labels added to a plain
+            # report produce a partial section whose fields are still type-checked.
+            issues.extend(
+                validate_insight_payload(
+                    insights,
+                    path=f"$[{index}].insights",
+                    partial="version" not in insights,
+                )
+            )
     return issues
 
 
-def validate_insight_payload(payload: Any, *, path: str = "$") -> list[ValidationIssue]:
-    return _validate_required(payload, INSIGHTS_SCHEMA, path=path)
+def validate_insight_payload(payload: Any, *, path: str = "$", partial: bool = False) -> list[ValidationIssue]:
+    schema = {**INSIGHTS_SCHEMA, "required": []} if partial else INSIGHTS_SCHEMA
+    return _validate_required(payload, schema, path=path)
 
 
 def validate_scorecard_payload(payload: Any) -> list[ValidationIssue]:

@@ -121,7 +121,7 @@ INSIGHTS_SCHEMA = {
                 "properties": {
                     "id": {"type": "string"},
                     "severity": {"type": "string", "enum": ["info", "warn", "fail"]},
-                    "confidence": {"type": "number"},
+                    "confidence": {"type": ["number", "null"]},
                     "evidence": {"type": "string"},
                     "evidence_metrics": {"type": "array", "items": {"type": "object"}},
                 },

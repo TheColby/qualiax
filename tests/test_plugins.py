@@ -120,7 +120,11 @@ def test_apply_label_providers_merges_labels_and_records_diagnostics():
     _register_snr_label(manager)
     manager.register_label_provider("crashy", lambda result: {}["missing"])
     noisy = FileResult(path="noisy.wav", metrics=[MetricResult(name="Estimated SNR", value=9.0, group="noise")])
-    noisy.insights = {"defect_labels": [{"id": "noisy_floor", "severity": "fail"}]}
+    noisy.insights = {
+        "defect_labels": [
+            {"id": "noisy_floor", "severity": "fail", "confidence": 0.9, "evidence": "SNR 9 dB", "evidence_metrics": []}
+        ]
+    }
     clean = FileResult(path="clean.wav", metrics=[MetricResult(name="Estimated SNR", value=30.0, group="noise")])
 
     summary = manager.apply_label_providers([noisy, clean])

@@ -3,6 +3,7 @@ import warnings
 
 import pytest
 
+from qualiax.insights import enrich_results
 from qualiax.migrations import (
     ExitCode,
     MigrationRegistry,
@@ -32,9 +33,9 @@ def _current_payload():
         diagnostics=[DiagnosticEntry(code="c", severity="warn", source="runtime", message="m")],
         group_health=[GroupHealth(group="noise", status="ok", metric_count=1)],
         provenance=ProvenanceInfo(compute_backend="cpu", model_assets=[]),
-        insights={"version": "1"},
         metrics=[MetricResult(name="Estimated SNR", value=20.0, unit="dB", group="noise", reference_range=(15.0, 60.0))],
     )
+    enrich_results([result])
     return json.loads(JsonReporter().render([result]))
 
 
@@ -127,12 +128,13 @@ def test_unknown_or_future_versions_are_rejected():
 def test_custom_registry_chain_and_cycle_detection():
     registry = MigrationRegistry()
     registry.register("0.1", lambda item: {"schema_version": "3.4", "file": item["name"]})
-    registry.register("3.4", lambda item: {**item, "schema_version": OUTPUT_SCHEMA_VERSION, "insights": {"custom": True}})
+    custom_insights = {"repair_suggestions": ["custom step ran"]}
+    registry.register("3.4", lambda item: {**item, "schema_version": OUTPUT_SCHEMA_VERSION, "insights": custom_insights})
 
     migrated = registry.migrate({"schema_version": "0.1", "name": "x.wav"})
 
     assert migrated["file"] == "x.wav"
-    assert migrated["insights"] == {"custom": True}
+    assert migrated["insights"] == custom_insights
     assert migrated["schema_version"] == OUTPUT_SCHEMA_VERSION
     assert validate_report_payload([migrated]) == []
     assert registry.versions() == ["0.1", "3.4"]
