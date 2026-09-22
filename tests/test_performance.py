@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import pytest
 
+from qualiax.migrations import QualiaxDeprecationWarning
 from qualiax.performance import (
     AnalysisCache,
     LocalExecutorAdapter,
@@ -168,7 +169,10 @@ def test_local_executor_adapter_uses_supplied_executor():
             calls.append(fn)
             return super().map(fn, *iterables, **kwargs)
 
-    with RecordingExecutor(max_workers=2) as executor:
+    with RecordingExecutor(max_workers=2) as executor, pytest.warns(QualiaxDeprecationWarning) as caught:
         assert LocalExecutorAdapter(executor=executor).map(abs, [-1, -2, 3]) == [1, 2, 3]
     assert calls == [abs]
-    assert LocalExecutorAdapter(max_workers=2).map(str, [1, 2]) == ["1", "2"]
+    assert caught[0].filename == __file__
+    assert caught[0].message.to_dict()["removal_version"] == "2.0.0"
+    with pytest.warns(QualiaxDeprecationWarning):
+        assert LocalExecutorAdapter(max_workers=2).map(str, [1, 2]) == ["1", "2"]

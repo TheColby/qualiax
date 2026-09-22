@@ -11,11 +11,19 @@ from .discovery import collect_requested_files
 from .insights import enrich_results
 from .metrics import available_metric_groups
 from .models import FileResult
+from .performance import AnalysisCache, analysis_cache_config, analyze_with_cache, cache_lookup, cache_store
+from .plugins import PluginManager
 from .presets import get_preset
 from .rules import apply_threshold_rules
 
 PathLike = Union[str, Path]
 AnalysisResult = list[FileResult]
+
+
+def _as_cache(cache: AnalysisCache | PathLike | None) -> AnalysisCache | None:
+    if cache is None or isinstance(cache, AnalysisCache):
+        return cache
+    return AnalysisCache(cache)
 
 
 def analyze(
@@ -37,6 +45,8 @@ def analyze(
     fingerprint_sensitivity: str = "balanced",
     fingerprint_weights: dict[str, float] | None = None,
     insight_rules: PathLike | None = None,
+    cache: AnalysisCache | PathLike | None = None,
+    plugins: PluginManager | None = None,
 ) -> AnalysisResult:
     """Analyze one or more paths and always return a list of FileResult objects."""
     files = collect_requested_files(_normalize_paths(paths))
@@ -57,7 +67,11 @@ def analyze(
         strict=strict,
         include_demographics=include_demographics,
     )
-    results = analyzer.analyze_all(files)
+    cache_dir = _as_cache(cache)
+    if cache_dir is None:
+        results = analyzer.analyze_all(files)
+    else:
+        results = analyze_with_cache(files, analyzer.analyze_all, cache_dir, analysis_cache_config(analyzer))
     if selected_preset is not None:
         apply_threshold_rules(results, list(selected_preset.rules))
     if insights:
@@ -71,7 +85,10 @@ def analyze(
             fingerprint_weights=fingerprint_weights,
             preset=preset,
             insight_rules_path=insight_rules,
+            plugins=plugins,
         )
+    elif plugins is not None:
+        plugins.apply_label_providers(results)
     return results
 
 
@@ -94,6 +111,8 @@ async def analyze_async(
     fingerprint_sensitivity: str = "balanced",
     fingerprint_weights: dict[str, float] | None = None,
     insight_rules: PathLike | None = None,
+    cache: AnalysisCache | PathLike | None = None,
+    plugins: PluginManager | None = None,
 ) -> AnalysisResult:
     """Asynchronously analyze one or more paths and return a list of FileResult objects."""
     files = collect_requested_files(_normalize_paths(paths))
@@ -113,7 +132,14 @@ async def analyze_async(
         strict=strict,
         include_demographics=include_demographics,
     )
-    results = await analyzer.analyze_all_async(files)
+    cache_dir = _as_cache(cache)
+    if cache_dir is None:
+        results = await analyzer.analyze_all_async(files)
+    else:
+        config = analysis_cache_config(analyzer)
+        hits, misses = cache_lookup(files, cache_dir, config)
+        fresh = await analyzer.analyze_all_async(misses) if misses else []
+        results = cache_store(files, hits, misses, fresh, cache_dir, config)
     if selected_preset is not None:
         apply_threshold_rules(results, list(selected_preset.rules))
     if insights:
@@ -127,7 +153,10 @@ async def analyze_async(
             fingerprint_weights=fingerprint_weights,
             preset=preset,
             insight_rules_path=insight_rules,
+            plugins=plugins,
         )
+    elif plugins is not None:
+        plugins.apply_label_providers(results)
     return results
 
 
@@ -150,6 +179,8 @@ def analyze_one(
     fingerprint_sensitivity: str = "balanced",
     fingerprint_weights: dict[str, float] | None = None,
     insight_rules: PathLike | None = None,
+    cache: AnalysisCache | PathLike | None = None,
+    plugins: PluginManager | None = None,
 ) -> FileResult:
     """Analyze exactly one requested path and always return a single FileResult."""
     results = analyze(
@@ -170,6 +201,8 @@ def analyze_one(
         fingerprint_sensitivity=fingerprint_sensitivity,
         fingerprint_weights=fingerprint_weights,
         insight_rules=insight_rules,
+        cache=cache,
+        plugins=plugins,
     )
     if len(results) != 1:
         raise ValueError("analyze_one() expected exactly one result.")
@@ -195,6 +228,8 @@ def analyze_many(
     fingerprint_sensitivity: str = "balanced",
     fingerprint_weights: dict[str, float] | None = None,
     insight_rules: PathLike | None = None,
+    cache: AnalysisCache | PathLike | None = None,
+    plugins: PluginManager | None = None,
 ) -> list[FileResult]:
     """Analyze one or more paths and always return a list of FileResult objects."""
     return analyze(
@@ -215,6 +250,8 @@ def analyze_many(
         fingerprint_sensitivity=fingerprint_sensitivity,
         fingerprint_weights=fingerprint_weights,
         insight_rules=insight_rules,
+        cache=cache,
+        plugins=plugins,
     )
 
 

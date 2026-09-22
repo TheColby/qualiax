@@ -222,3 +222,16 @@ def test_load_asset_lock_rejects_malformed_files(tmp_path):
     bad.write_text(json.dumps({"a.onnx": 5}))
     with pytest.raises(ValueError):
         load_asset_lock(bad)
+
+
+def test_distributed_adapter_access_is_deprecated():
+    import qualiax
+    from qualiax.performance import DistributedAdapter
+
+    with pytest.warns(QualiaxDeprecationWarning, match="qualiax.DistributedAdapter") as caught:
+        adapter = qualiax.DistributedAdapter
+    assert adapter is DistributedAdapter
+    assert caught[0].filename == __file__
+    assert "DistributedAdapter" not in qualiax.__all__
+    with pytest.raises(AttributeError):
+        qualiax.NoSuchThing

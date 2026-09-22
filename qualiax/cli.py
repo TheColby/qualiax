@@ -29,6 +29,8 @@ from .insights import (
     validate_insights_report,
 )
 from .metrics import available_metric_groups
+from .performance import AnalysisCache, analysis_cache_config, analyze_with_cache
+from .plugins import PluginManager
 from .migrations import ExitCode
 from .presets import available_presets, get_preset, lint_preset
 from .reporter import ConsoleReporter, JsonReporter, JsonlReporter, CsvReporter, HtmlReporter, MarkdownReporter
@@ -74,7 +76,59 @@ def collect_files(path: Path) -> list[Path]:
         raise click.ClickException(str(exc)) from exc
 
 
-@click.command()
+class _ContractViolation(click.ClickException):
+    exit_code = ExitCode.CONTRACT_VIOLATION
+
+
+class _AnalysisFailed(click.ClickException):
+    exit_code = ExitCode.ANALYSIS_FAILED
+
+
+class _QualiaxCommand(click.Command):
+    """Report command-line usage errors as INVALID_INPUT instead of Click's default 2,
+    which would be indistinguishable from QUALITY_GATE_FAILED."""
+
+    def parse_args(self, ctx, args):
+        try:
+            return super().parse_args(ctx, args)
+        except click.UsageError as exc:
+            exc.exit_code = ExitCode.INVALID_INPUT
+            raise
+
+    def invoke(self, ctx):
+        try:
+            return super().invoke(ctx)
+        except click.UsageError as exc:
+            exc.exit_code = ExitCode.INVALID_INPUT
+            raise
+
+
+_INPUT_ERROR_CODES = frozenset({"audio_load_failed", "reference_load_failed"})
+
+
+def _errors_exit_code(results) -> ExitCode | None:
+    errored = [result for result in results if result.error]
+    if not errored:
+        return None
+    if all(any(d.code in _INPUT_ERROR_CODES for d in result.diagnostics) for result in errored):
+        return ExitCode.INVALID_INPUT
+    return ExitCode.ANALYSIS_FAILED
+
+
+# Most severe first; a run reports the most severe outcome of any batch.
+_EXIT_SEVERITY = (
+    ExitCode.ANALYSIS_FAILED,
+    ExitCode.INVALID_INPUT,
+    ExitCode.QUALITY_GATE_FAILED,
+    ExitCode.OK,
+)
+
+
+def _most_severe(*codes: ExitCode) -> ExitCode:
+    return min(codes, key=_EXIT_SEVERITY.index)
+
+
+@click.command(cls=_QualiaxCommand)
 @click.argument("paths", nargs=-1, required=False, type=click.Path())
 @click.option("--silent", is_flag=True, help="Suppress console output (useful with --output).")
 @click.option("--save-sidecar", is_flag=True,
@@ -150,6 +204,12 @@ def collect_files(path: Path) -> list[Path]:
               help="Export WAV snippets for flagged insight segments into this directory.")
 @click.option("--insights-summary", type=click.Path(), default=None,
               help="Write compact pipeline-oriented insights JSON summary.")
+@click.option("--cache", "cache_dir", type=click.Path(file_okay=False), default=None,
+              help="Reuse results for unchanged files from this cache directory "
+                   "(keyed by file size and mtime, analysis options, and qualiax version).")
+@click.option("--plugins", "use_plugins", is_flag=True,
+              help="Discover installed qualiax plugins (entry points in 'qualiax.plugins') "
+                   "and run their label providers.")
 def main(
     paths: tuple[str, ...],
     silent: bool,
@@ -188,6 +248,8 @@ def main(
     insight_rules: Optional[str],
     insight_snippets: Optional[str],
     insights_summary: Optional[str],
+    cache_dir: Optional[str],
+    use_plugins: bool,
 ) -> None:
     """
     \b
@@ -213,6 +275,8 @@ def main(
       qualiax diff before.json after.json --format markdown
       qualiax *.wav --metrics basic,loudness,spectral --no-color
     """
+    plugin_manager = _discover_plugins(silent=silent) if use_plugins else None
+
     if paths and paths[0] == "insights":
         _run_insights_subcommand(
             args=paths[1:],
@@ -226,6 +290,7 @@ def main(
             fingerprint_sensitivity=fingerprint_sensitivity,
             preset=preset,
             insight_rules=insight_rules,
+            plugins=plugin_manager,
         )
         return
 
@@ -252,9 +317,12 @@ def main(
             or insight_rules
             or insight_snippets
             or insights_summary
+            or cache_dir
+            or use_plugins
         ):
             raise click.UsageError(
-                "diff mode does not support segment, microphone, watch, lint, validation, or insights options."
+                "diff mode does not support segment, microphone, watch, lint, validation, insights, cache, "
+                "or plugin options."
             )
         _run_diff(
             diff_args=paths[1:],
@@ -290,6 +358,8 @@ def main(
         raise click.UsageError("--mic-seconds cannot be combined with input paths.")
     if watch and mic_seconds is not None:
         raise click.UsageError("--watch cannot be combined with --mic-seconds.")
+    if watch and cache_dir:
+        raise click.UsageError("--cache is not supported with --watch.")
     if not paths and mic_seconds is None and not lint_rules:
         raise click.UsageError("Provide at least one input path, use '-', or set --mic-seconds.")
     _check_insight_options(
@@ -398,7 +468,7 @@ def main(
             for issue in issues:
                 label = "error" if issue.level == "error" else "warn"
                 click.echo(f"[{label}] {issue.message}", err=True)
-            sys.exit(ExitCode.QUALITY_GATE_FAILED if any(issue.level == "error" for issue in issues) else ExitCode.OK)
+            sys.exit(ExitCode.INVALID_INPUT if any(issue.level == "error" for issue in issues) else ExitCode.OK)
         error_lints = [issue for issue in preset_lints + user_rule_lints if issue.level == "error"]
         if error_lints:
             raise click.ClickException(error_lints[0].message)
@@ -456,7 +526,7 @@ def main(
         def _validate_written_path(path: Path) -> None:
             issues = validate_report_file(path)
             if issues:
-                raise click.ClickException(
+                raise _ContractViolation(
                     "Output validation failed: "
                     + "; ".join(f"{issue.path}: {issue.message}" for issue in issues[:6])
                 )
@@ -527,18 +597,19 @@ def main(
             reporter = _make_reporter(console_fmt, color=not no_color)
             click.echo(reporter.render(batch_results))
 
-        def _batch_exit_code(batch_results, violations) -> int:
-            if any(result.error for result in batch_results):
-                return 1
+        def _batch_exit_code(batch_results, violations) -> ExitCode:
+            error_code = _errors_exit_code(batch_results)
+            if error_code is not None:
+                return error_code
             if violations:
-                return 2
+                return ExitCode.QUALITY_GATE_FAILED
             if any(
                 check.get("status") == "fail"
                 for result in batch_results
                 for check in result.insights.get("ci_checks", [])
             ):
-                return 2
-            return 0
+                return ExitCode.QUALITY_GATE_FAILED
+            return ExitCode.OK
 
         if watch:
             if output and Path(output).exists() and not force:
@@ -559,7 +630,7 @@ def main(
             snippet_session: set[str] = set()
             aggregate_results = []
             processed = 0
-            exit_code = 0
+            exit_code = ExitCode.OK
             out_fmt = _detect_format(Path(output), fmt) if output else fmt
             if not silent:
                 click.echo(
@@ -613,9 +684,12 @@ def main(
                                 fingerprint_sensitivity=fingerprint_sensitivity,
                                 preset=preset,
                                 insight_rules_path=insight_rules,
+                                plugins=plugin_manager,
                             )
                             if insight_snippets:
                                 _export_snippets(aggregate_results, insight_snippets, force=force, session_paths=snippet_session)
+                        elif plugin_manager is not None:
+                            plugin_manager.apply_label_providers(batch_results)
                         _write_sidecars(batch_results, allow_overwrite=force)
                         if out_fmt == "jsonl":
                             _write_output(batch_results, allow_overwrite=True, append=True)
@@ -624,11 +698,7 @@ def main(
                         _write_scorecard(aggregate_results, allow_overwrite=True)
                         _write_insights_summary(aggregate_results, allow_overwrite=True)
                         _render_console(batch_results)
-                        batch_exit = _batch_exit_code(batch_results, violations)
-                        if batch_exit == 1:
-                            exit_code = 1
-                        elif batch_exit == 2 and exit_code == 0:
-                            exit_code = 2
+                        exit_code = _most_severe(exit_code, _batch_exit_code(batch_results, violations))
                         processed += len(new_files)
                         if watch_limit is not None and processed >= watch_limit:
                             break
@@ -637,7 +707,24 @@ def main(
                     click.echo("Watch mode stopped.", err=True)
             sys.exit(exit_code)
 
-        results = _normalize_results(analyzer.analyze_all(all_files, on_progress=_on_progress))
+        cache = AnalysisCache(cache_dir) if cache_dir else None
+        if cache is not None and stdin_paths:
+            cache = None
+            if not silent:
+                click.echo("[warn] --cache is ignored for stdin and microphone input.", err=True)
+        try:
+            results = _normalize_results(
+                analyze_with_cache(
+                    all_files,
+                    lambda files: analyzer.analyze_all(files, on_progress=_on_progress),
+                    cache,
+                    analysis_cache_config(analyzer) if cache is not None else {},
+                )
+            )
+        except Exception as exc:
+            if not strict:
+                raise
+            raise _AnalysisFailed(str(exc)) from exc
         preset_violations = apply_threshold_rules(results, preset_rule_defs)
         user_violations = apply_threshold_rules(
             results,
@@ -655,9 +742,12 @@ def main(
                 fingerprint_sensitivity=fingerprint_sensitivity,
                 preset=preset,
                 insight_rules_path=insight_rules,
+                plugins=plugin_manager,
             )
             if insight_snippets:
                 _export_snippets(results, insight_snippets, force=force)
+        elif plugin_manager is not None:
+            plugin_manager.apply_label_providers(results)
         _write_sidecars(results, allow_overwrite=force)
         _write_output(results, allow_overwrite=force)
         _write_scorecard(results, allow_overwrite=force)
@@ -672,11 +762,20 @@ def main(
                 pass
 
 
+def _discover_plugins(*, silent: bool) -> PluginManager:
+    manager = PluginManager()
+    manager.discover()
+    if not silent:
+        for failure in manager.discovery_failures:
+            click.echo(
+                f"[warn] Plugin {failure['plugin']!r} was skipped ({failure['stage']}): {failure['error']}",
+                err=True,
+            )
+    return manager
+
+
 def _parse_metric_groups(metrics: Optional[str], preset_groups: tuple[str, ...] | None = None) -> set[str]:
-    valid = {
-        "basic", "loudness", "spectral", "temporal", "noise", "speech",
-        "perceptual", "prosody", "psychoacoustic", "speaker", "all",
-    }
+    valid = set(available_metric_groups()) | {"all"}
     if not metrics:
         if preset_groups:
             return set(preset_groups)
@@ -745,6 +844,7 @@ def _run_insights_subcommand(
     fingerprint_sensitivity: str,
     preset: Optional[str],
     insight_rules: Optional[str],
+    plugins: Optional[PluginManager] = None,
 ) -> None:
     if args and args[0] == "validate":
         if len(args) != 2:
@@ -778,6 +878,7 @@ def _run_insights_subcommand(
             fingerprint_sensitivity=fingerprint_sensitivity,
             preset=preset,
             insight_rules_path=insight_rules,
+            plugins=plugins,
         )
     except InsightInputError as exc:
         raise click.ClickException(str(exc)) from exc

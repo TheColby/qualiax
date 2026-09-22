@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import numpy as np
 import pytest
 
+from qualiax.migrations import QualiaxDeprecationWarning
 from qualiax.models import FileResult, MetricResult
 from qualiax.operations import (
     AlertPolicy,
@@ -55,7 +56,9 @@ def _result(path, **values):
 
 
 def test_rolling_window_is_bounded_and_summarizes():
-    window = RollingMetricWindow(size=3)
+    with pytest.warns(QualiaxDeprecationWarning, match="DriftHistory.window") as caught:
+        window = RollingMetricWindow(size=3)
+    assert caught[0].filename == __file__
     for value in (1.0, 2.0, 3.0, 10.0):
         summary = window.add("snr", value)
 

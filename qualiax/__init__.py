@@ -49,7 +49,6 @@ from .operations import (
 )
 from .performance import (
     AnalysisCache,
-    DistributedAdapter,
     LocalExecutorAdapter,
     benchmark_budget,
     incremental_sources,
@@ -128,7 +127,6 @@ __all__ = [
     "send_webhook",
     "deliver_alert",
     "AnalysisCache",
-    "DistributedAdapter",
     "LocalExecutorAdapter",
     "source_signature",
     "incremental_sources",
@@ -168,3 +166,18 @@ __all__ = [
     "assert_valid_scorecard_payload",
     "device_info",
 ]
+
+
+def __getattr__(name: str):
+    if name == "DistributedAdapter":
+        from .migrations import warn_deprecated
+        from .performance import DistributedAdapter
+
+        warn_deprecated(
+            "qualiax.DistributedAdapter",
+            removal_version="2.0.0",
+            alternative="a typing.Protocol in your own code",
+            stacklevel=3,
+        )
+        return DistributedAdapter
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

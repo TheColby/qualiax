@@ -137,6 +137,49 @@ class FileResult:
     content_type: Optional[str] = None   # "speech" | "music" | "noise" | "silence" | "mixed" | "unknown"
     speech_confidence: Optional[float] = None
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "FileResult":
+        """Rebuild a result from ``to_dict()`` output (or a parsed JSON report item)."""
+        provenance = data.get("provenance")
+        return cls(
+            path=str(data.get("file", "")),
+            source_file=data.get("source_file"),
+            segment_index=data.get("segment_index"),
+            total_segments=data.get("total_segments"),
+            segment_start_s=data.get("segment_start_s"),
+            segment_end_s=data.get("segment_end_s"),
+            metrics=[
+                MetricResult(
+                    name=item["name"],
+                    value=item.get("value"),
+                    unit=item.get("unit", ""),
+                    description=item.get("description", ""),
+                    group=item.get("group", ""),
+                    higher_is_better=item.get("higher_is_better"),
+                    warning=item.get("warning"),
+                    reference_range=(
+                        tuple(item["reference_range"]) if item.get("reference_range") is not None else None
+                    ),
+                    confidence=item.get("confidence"),
+                    calibration_note=item.get("calibration_note"),
+                )
+                for item in data.get("metrics", [])
+            ],
+            notes=list(data.get("notes", [])),
+            confidence_notes=list(data.get("confidence_notes", [])),
+            diagnostics=[DiagnosticEntry(**item) for item in data.get("diagnostics", [])],
+            group_health=[GroupHealth(**item) for item in data.get("group_health", [])],
+            provenance=ProvenanceInfo(**provenance) if provenance else None,
+            insights=dict(data.get("insights") or {}),
+            error=data.get("error"),
+            duration_s=float(data.get("duration_s") or 0.0),
+            sample_rate=int(data.get("sample_rate") or 0),
+            channels=int(data.get("channels") or 0),
+            bit_depth=data.get("bit_depth"),
+            content_type=data.get("content_type"),
+            speech_confidence=data.get("speech_confidence"),
+        )
+
     def metrics_by_group(self) -> dict[str, list[MetricResult]]:
         groups: dict[str, list[MetricResult]] = {}
         for m in self.metrics:

@@ -186,53 +186,74 @@ def compute_spectral_tilt(audio: NDArray, sr: int) -> tuple[list[MetricResult], 
 
 # ─── Cepstral Peak Prominence (CPP) ──────────────────────────────────────────
 
+_CPP_SR = 16_000
+_CPP_F0_RANGE_HZ = (60.0, 500.0)
+_CPP_TREND_QUEFRENCY_S = (0.001, 0.05)
+_CPP_ACTIVE_FLOOR_DB = -30.0
+# Breathiness anchors, measured with this CPP on the VoiceBank-DEMAND test set:
+# clean read speech has median 19.5 dB (p10 18.4, p90 21.1); heavy aspiration
+# noise on a synthetic voice brings it to ~16.8 dB.
+_BREATHINESS_CLEAR_DB = 21.0
+_BREATHINESS_BREATHY_DB = 13.0
+
+
+def _cpp_per_frame(mono: NDArray, sr: int) -> NDArray:
+    if sr != _CPP_SR:
+        from scipy.signal import resample_poly
+
+        g = math.gcd(int(sr), _CPP_SR)
+        mono = resample_poly(mono, _CPP_SR // g, int(sr) // g)
+        sr = _CPP_SR
+    frame = 1 << int(np.ceil(np.log2(0.04 * sr)))
+    hop = int(0.01 * sr)
+    if len(mono) < frame:
+        return np.array([])
+    starts = hop * np.arange((len(mono) - frame) // hop + 1)
+    frames = mono[starts[:, None] + np.arange(frame)[None, :]] * np.hanning(frame)
+    rms = np.sqrt(np.mean(frames ** 2, axis=1))
+    frames = frames[rms > max(1e-4, float(rms.max()) * 10 ** (_CPP_ACTIVE_FLOOR_DB / 20))]
+    if not len(frames):
+        return np.array([])
+
+    spectrum_db = 10 * np.log10(np.abs(np.fft.rfft(frames, axis=1)) ** 2 + 1e-20)
+    cepstrum_db = 10 * np.log10(np.abs(np.fft.irfft(spectrum_db, n=frame, axis=1)) ** 2 + 1e-20)
+    quefrency = np.arange(frame) / sr
+    usable = np.arange(frame) < frame // 2
+    f0_lo, f0_hi = _CPP_F0_RANGE_HZ
+    peak_bins = np.flatnonzero(usable & (quefrency >= 1 / f0_hi) & (quefrency <= 1 / f0_lo))
+    trend_bins = np.flatnonzero(
+        usable & (quefrency >= _CPP_TREND_QUEFRENCY_S[0]) & (quefrency <= _CPP_TREND_QUEFRENCY_S[1])
+    )
+
+    x = quefrency[trend_bins]
+    y = cepstrum_db[:, trend_bins]
+    slope = ((y - y.mean(axis=1, keepdims=True)) @ (x - x.mean())) / np.sum((x - x.mean()) ** 2)
+    intercept = y.mean(axis=1) - slope * x.mean()
+    peaks = peak_bins[np.argmax(cepstrum_db[:, peak_bins], axis=1)]
+    return cepstrum_db[np.arange(len(peaks)), peaks] - (slope * quefrency[peaks] + intercept)
+
+
 def compute_cpp(audio: NDArray, sr: int) -> tuple[list[MetricResult], Optional[float]]:
     """
     Cepstral Peak Prominence (CPP) — Hillenbrand et al. (1994).
 
-    CPP = height of cepstral peak above a regression baseline.
-    High CPP → clear, modal voice.  Low CPP → breathy / dysphonic.
-    Typical voiced speech: CPP > 5 dB.  Breathy: CPP < 3 dB.
+    Per 10 ms frame (Hann window, ~40 ms, analysed at 16 kHz): the power cepstrum
+    of the dB power spectrum, in dB, and the height of its peak in the 60–500 Hz
+    F0 range above a least-squares trend line fitted over 1–50 ms quefrency.
+    CPP is the mean over active frames (within 30 dB of the loudest frame).
     """
-    n_fft  = 1024
-    hop    = n_fft // 4
-    q_min  = max(1, sr // 500)   # quefrency range for F0
-    q_max  = min(n_fft // 4, sr // 50)
-    cpp_vals = []
-    mono   = _to_mono(audio)
-
-    for i in range(0, len(mono) - n_fft, hop):
-        frame = mono[i:i + n_fft] * np.hanning(n_fft)
-        if np.sqrt(np.mean(frame ** 2)) < 1e-4:
-            continue
-
-        power = np.abs(np.fft.rfft(frame)) ** 2
-        power = np.maximum(power, 1e-14)
-        cepstrum = np.abs(np.fft.irfft(np.log(power)))
-
-        if q_max >= len(cepstrum) // 2 or q_max <= q_min:
-            continue
-
-        region  = cepstrum[q_min:q_max]
-        q_idx   = np.arange(q_min, q_max)
-        peak_i  = int(np.argmax(region))
-        peak_v  = float(region[peak_i])
-
-        if len(q_idx) > 3:
-            bl = float(np.polyval(np.polyfit(q_idx, region, 1), q_idx[peak_i]))
-            cpp_vals.append(peak_v - bl)
-
-    if not cpp_vals:
+    cpp_vals = _cpp_per_frame(_to_mono(audio).astype(np.float64), sr)
+    if not cpp_vals.size:
         return [], None
 
     cpp_mean = float(np.mean(cpp_vals))
     results  = [MetricResult(
         "Cepstral Peak Prominence (CPP)", round(cpp_mean, 4), "dB",
-        "Hillenbrand (1994) CPP. Higher = clearer modal voice. "
-        "< 3 dB may indicate breathiness or dysphonia.", "speaker",
+        "Hillenbrand (1994) CPP. Higher = clearer, more periodic voice. Clean connected "
+        "speech is typically 18–21 dB; breathiness and background noise both lower it.", "speaker",
         higher_is_better=True,
-        reference_range=(5.0, 25.0),
-        warning="Low CPP — possible breathy or dysphonic voice" if cpp_mean < 3.0 else None,
+        reference_range=(17.0, 35.0),
+        warning="Low CPP — breathy or dysphonic voice, or background noise" if cpp_mean < 16.0 else None,
     )]
     return results, cpp_mean
 
@@ -304,13 +325,16 @@ def compute_voice_quality(audio: NDArray, sr: int) -> list[MetricResult]:
     results.extend(cpp_results)
 
     if cpp_val is not None:
-        # Breathiness: 0 (clear) – 1 (highly breathy)
-        breathiness = max(0.0, min(1.0, 1.0 - cpp_val / 20.0))
+        span = _BREATHINESS_CLEAR_DB - _BREATHINESS_BREATHY_DB
+        breathiness = max(0.0, min(1.0, (_BREATHINESS_CLEAR_DB - cpp_val) / span))
         results.append(MetricResult(
             "Breathiness Index", round(breathiness, 4), "0–1",
-            "0 = modal/clear voice, 1 = highly breathy. Derived from CPP.", "speaker",
+            f"0 = modal/clear voice (CPP ≥ {_BREATHINESS_CLEAR_DB:g} dB), 1 = highly breathy "
+            f"(CPP ≤ {_BREATHINESS_BREATHY_DB:g} dB). Linear in CPP.", "speaker",
             higher_is_better=False,
-            warning="Elevated breathiness detected" if breathiness > 0.5 else None,
+            warning=(
+                "Elevated breathiness (background noise also lowers CPP)" if breathiness > 0.6 else None
+            ),
         ))
 
     # Creakiness / vocal fry: F0 < 80 Hz in otherwise active frames

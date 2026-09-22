@@ -264,15 +264,6 @@ def test_white_noise_is_not_creaky(sig):
     assert v["Creakiness (Vocal Fry) Ratio"] < 5.0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "CPP is a linear cepstral-amplitude difference labelled 'dB' and compared "
-        "with Hillenbrand's dB thresholds: a perfectly periodic voice scores "
-        "0.4-1.4 and Breathiness Index (1 - CPP/20) reads ~0.95 for every input. "
-        "A dB cepstrum, smoothing and regression range need an owner decision."
-    ),
-)
 def test_cpp_of_periodic_voice_lands_in_documented_range(sig):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -281,6 +272,37 @@ def test_cpp_of_periodic_voice_lands_in_documented_range(sig):
     lo, hi = cpp.reference_range
     assert lo <= cpp.value <= hi
     assert v["Breathiness Index"].value < 0.5
+
+
+def _aspirated(sig, hnr_db, sr=SR, seed=3):
+    voice = sig.harmonic(150, 2.0, sr=sr)
+    noise = np.random.default_rng(seed).normal(size=voice.size)
+    noise *= np.sqrt(np.mean(voice ** 2) / np.mean(noise ** 2)) * 10 ** (-hnr_db / 20)
+    return voice + noise
+
+
+def test_cpp_falls_monotonically_as_aspiration_noise_rises(sig):
+    cpp = [S.compute_cpp(_aspirated(sig, hnr), SR)[1] for hnr in (30, 20, 10, 5, 0)]
+    assert all(a > b for a, b in zip(cpp, cpp[1:])), cpp
+    assert cpp[0] - cpp[-1] > 5.0
+
+
+def test_cpp_is_sample_rate_invariant(sig):
+    at_16k = S.compute_cpp(sig.harmonic(150, 2.0, sr=16_000), 16_000)[1]
+    at_48k = S.compute_cpp(sig.harmonic(150, 2.0, sr=48_000), 48_000)[1]
+    assert abs(at_16k - at_48k) < 1.0
+
+
+def test_breathiness_index_is_linear_in_cpp_between_anchors(sig):
+    def breathiness(audio):
+        return {m.name: m.value for m in S.compute_voice_quality(audio, SR)}["Breathiness Index"]
+
+    clear, breathy = breathiness(sig.harmonic(150, 2.0)), breathiness(_aspirated(sig, -5))
+    assert clear == 0.0
+    assert breathy > 0.6
+    cpp = S.compute_cpp(_aspirated(sig, 5), SR)[1]
+    expected = (S._BREATHINESS_CLEAR_DB - cpp) / (S._BREATHINESS_CLEAR_DB - S._BREATHINESS_BREATHY_DB)
+    assert breathiness(_aspirated(sig, 5)) == pytest.approx(min(1.0, max(0.0, expected)), abs=1e-3)
 
 
 def test_demographic_heuristics_follow_documented_bands():

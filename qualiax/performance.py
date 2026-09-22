@@ -15,6 +15,88 @@ T = TypeVar("T")
 R = TypeVar("R")
 
 
+def analysis_cache_config(analyzer) -> dict:
+    """Everything about an ``AudioAnalyzer`` that changes its output, for cache keys."""
+    from .metrics import available_metric_groups
+
+    groups = set(analyzer.metric_groups)
+    if "all" in groups:
+        groups = set(available_metric_groups())
+    reference = None
+    if analyzer.reference is not None:
+        reference = {
+            "path": str(Path(analyzer.reference).expanduser().resolve(strict=False)),
+            "signature": list(source_signature(analyzer.reference)),
+        }
+    return {
+        "metric_groups": sorted(groups),
+        "reference": reference,
+        "segment_seconds": analyzer.segment_seconds,
+        "include_demographics": analyzer.include_demographics,
+    }
+
+
+def analyze_with_cache(
+    files: Sequence[Path],
+    analyze: Callable[[list[Path]], list],
+    cache: AnalysisCache | None,
+    config: Mapping,
+) -> list:
+    """Serve ``files`` from ``cache`` where possible and ``analyze`` the rest.
+
+    Results come back in ``files`` order. Fresh results are cached per source file
+    unless analysis reported an error, so a transient failure is retried next time.
+    """
+    if cache is None:
+        return analyze(list(files))
+    hits, misses = cache_lookup(files, cache, config)
+    return cache_store(files, hits, misses, analyze(misses) if misses else [], cache, config)
+
+
+def cache_lookup(files: Sequence[Path], cache: AnalysisCache, config: Mapping) -> tuple[dict[str, list], list[Path]]:
+    """Split ``files`` into cached results (keyed by ``str(path)``) and paths still to analyze."""
+    from .models import FileResult
+
+    hits: dict[str, list] = {}
+    misses: list[Path] = []
+    for path in files:
+        payload = cache.get(path, config=config)
+        items = payload.get("results") if payload else None
+        if isinstance(items, list):
+            hits[str(path)] = [FileResult.from_dict(item) for item in items]
+        else:
+            misses.append(path)
+    return hits, misses
+
+
+def cache_store(
+    files: Sequence[Path],
+    hits: dict[str, list],
+    misses: Sequence[Path],
+    fresh: list,
+    cache: AnalysisCache,
+    config: Mapping,
+) -> list:
+    """Cache ``fresh`` results for ``misses`` and merge everything back into ``files`` order."""
+    miss_keys = {str(path) for path in misses}
+    produced: dict[str, list] = {key: [] for key in miss_keys}
+    unmatched = []
+    for result in fresh:
+        key = result.source_file or result.path
+        (produced[key] if key in miss_keys else unmatched).append(result)
+    merged = dict(hits)
+    for path in misses:
+        results = produced[str(path)]
+        if results and all(_cacheable(result) for result in results):
+            cache.put(path, {"results": [result.to_dict() for result in results]}, config=config)
+        merged[str(path)] = results
+    return [result for path in files for result in merged.get(str(path), [])] + unmatched
+
+
+def _cacheable(result) -> bool:
+    return result.error is None and all(health.status != "error" for health in result.group_health)
+
+
 class AnalysisCache:
     """Small file-backed cache invalidated by source size and modification time.
 
@@ -202,9 +284,20 @@ class DistributedAdapter(Protocol):
 
 
 class LocalExecutorAdapter:
-    """Executor-compatible adapter that can be swapped for a remote backend."""
+    """Executor-compatible adapter that can be swapped for a remote backend.
+
+    Deprecated: it adds nothing over ``concurrent.futures.Executor.map``.
+    """
 
     def __init__(self, *, max_workers: int | None = None, executor: Executor | None = None):
+        from .migrations import warn_deprecated
+
+        warn_deprecated(
+            "LocalExecutorAdapter",
+            removal_version="2.0.0",
+            alternative="concurrent.futures.Executor.map",
+            stacklevel=3,
+        )
         self.max_workers = max_workers
         self.executor = executor
 

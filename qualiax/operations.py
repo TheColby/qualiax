@@ -18,9 +18,15 @@ from .models import FileResult
 
 
 class RollingMetricWindow:
-    """In-memory bounded window of the most recent values per metric."""
+    """In-memory bounded window of the most recent values per metric.
+
+    Deprecated: ``DriftHistory.window`` provides the same rolling view and persists it.
+    """
 
     def __init__(self, size: int = 20):
+        from .migrations import warn_deprecated
+
+        warn_deprecated("RollingMetricWindow", removal_version="2.0.0", alternative="DriftHistory.window", stacklevel=3)
         self.size = max(1, int(size))
         self._values: dict[str, deque[float]] = defaultdict(lambda: deque(maxlen=self.size))
 

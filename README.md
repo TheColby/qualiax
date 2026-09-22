@@ -634,10 +634,28 @@ A few behaviors worth knowing:
 - `ReviewStore` re-reads its file before every write, so several stores can share one file, and it
   raises instead of silently starting over when the file is corrupt.
 - `benchmark_budget(...)` counts a baseline metric that is missing from the current run as a failure.
-- `AnalysisCache` is a standalone helper: `analyze()` and the CLI don't consult it yet.
-- `ExitCode` provides stable values for automation, but the CLI doesn't use all of them consistently
-  yet: analysis failures exit `1`, and command-line usage errors exit `2`, the same code as a failed
-  quality gate. Both are planned for v1.2.0.
+- Pass `cache=".qualiax-cache"` to `analyze()` (or `--cache DIR` on the CLI) to reuse results for
+  files that haven't changed. Entries are keyed by file size and modification time, the analysis
+  options, and the qualiax version, and results with errors are never cached. Stdin and microphone
+  input bypass the cache, and `--watch` doesn't support it. A custom metric group registered with
+  `register_metric_group` isn't fingerprinted, so clear the cache after changing its code.
+- Plugin label providers run inside `--insights`: pass `plugins=manager` to `analyze()` or
+  `enrich_results()`, or add `--plugins` on the CLI to discover installed entry-point plugins. Their
+  labels feed repair suggestions, CI gates, and triage, and `--metrics` accepts metric groups that
+  plugins register. Discovery is opt-in because it runs third-party code.
+- Deprecated, to be removed in 2.0.0: `LocalExecutorAdapter` (use `concurrent.futures.Executor.map`),
+  `RollingMetricWindow` (use `DriftHistory.window`), and `qualiax.DistributedAdapter`.
+- `ExitCode` provides stable values for automation, and the CLI uses them consistently:
+
+  | Code | Name | When |
+  |---|---|---|
+  | `0` | `OK` | Everything succeeded and every gate passed |
+  | `1` | `INVALID_INPUT` | Command-line usage errors, missing or undecodable audio, invalid rule configs |
+  | `2` | `QUALITY_GATE_FAILED` | Threshold-rule violations or a failed `--ci` gate |
+  | `3` | `ANALYSIS_FAILED` | Analysis crashed after the audio loaded, including `--strict` metric-group failures |
+  | `4` | `CONTRACT_VIOLATION` | `--validate-output` or `qualiax insights validate` found schema violations |
+
+  When a run has several outcomes, the most severe wins: `3`, then `1`, then `2`.
 
 ---
 
@@ -1168,12 +1186,16 @@ Where: $`F_k`$ is the frequency of formant candidate $`k`$, $`BW_k`$ is its band
 **Cepstral Peak Prominence** (Hillenbrand et al. 1994):
 
 ```math
-\text{CPP} = \max_{q \in [q_{\min},\, q_{\max}]} \left[ c[q] - \hat{c}[q] \right]
+c[q] = 10\log_{10} \left\lvert \mathcal{F}^{-1}\left\{ 10\log_{10} \lvert X[k] \rvert^2 \right\} \right\rvert^2
 ```
 
-This equation measures how strongly the dominant cepstral pitch peak rises above its smooth baseline, which is a proxy for periodic voice clarity.
+```math
+\text{CPP} = c[q^\ast] - \hat{c}[q^\ast], \qquad q^\ast = \arg\max_{q \in [1/500\,\text{s},\ 1/60\,\text{s}]} c[q]
+```
 
-Where: $`\text{CPP}`$ is cepstral peak prominence in dB, $`q`$ is quefrency in samples, $`q_{min}`$ and $`q_{max}`$ define the searched quefrency range, $`c[q] = \lvert \mathcal{F}^{-1}\{\log \lvert X \rvert^2\} \rvert`$ is the real cepstrum, and $`\hat{c}[q]`$ is the linear-regression baseline over the pitch-relevant quefrency interval.
+These equations measure how far the cepstral pitch peak rises above the cepstrum's overall trend, which is a proxy for periodic voice clarity.
+
+Where: $`X[k]`$ is the spectrum of a Hann-windowed frame of about 40 ms (analysed at 16 kHz with a 10 ms hop), $`c[q]`$ is the power cepstrum in dB, $`q`$ is quefrency in seconds, the peak search range corresponds to F0 between 60 and 500 Hz, and $`\hat{c}[q]`$ is a least-squares line fitted to $`c[q]`$ over 1–50 ms. $`\text{CPP}`$ is averaged over frames within 30 dB of the loudest frame. The breathiness index is $`B = \min(1, \max(0, (21 - \text{CPP}) / 8))`$, anchored on clean read speech (median CPP 19.5 dB on the VoiceBank-DEMAND test set).
 
 **Gender estimation** (Traunmüller & Eriksson 1995 empirical distributions):
 
@@ -1190,8 +1212,8 @@ Where: $`\text{CPP}`$ is cepstral peak prominence in dB, $`q`$ is quefrency in s
 |--------|------|-------------|
 | F1–F4 Formant Frequency | Hz | Median $`F_k`$ over voiced frames (LPC, $`p = 12`$) |
 | Spectral Tilt | dB/oct | Power spectrum slope 100 Hz – Nyquist. Typical speech: $`-6`$ to $`-12`$ dB/oct |
-| Cepstral Peak Prominence (CPP) | dB | Higher = clearer periodic voice. Above 5 dB = modal; below 3 dB = breathy |
-| Breathiness Index | 0–1 | CPP-derived. 0 = modal voice; 1 = highly breathy |
+| Cepstral Peak Prominence (CPP) | dB | Higher = clearer periodic voice. Clean connected speech is typically 18–21 dB; below 16 dB suggests breathiness or background noise |
+| Breathiness Index | 0–1 | Linear in CPP: 0 at 21 dB or above, 1 at 13 dB or below. Background noise also raises it |
 | Creakiness (Vocal Fry) Ratio | % | Fraction of active frames with autocorrelation peak in 20–80 Hz |
 | Estimated Gender | — | Heuristic from F0 mean. 145–180 Hz = ambiguous overlap zone |
 | Gender Confidence | 0–1 | Distance from overlap zone as proxy for certainty |

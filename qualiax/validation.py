@@ -98,7 +98,7 @@ def _validate_required(payload: Any, schema: dict[str, Any], *, path: str) -> li
                     issues.append(ValidationIssue(path=f"{path}.{key}", message="Unexpected field."))
         return issues
     if schema_type == "array":
-        if not isinstance(payload, list):
+        if not isinstance(payload, (list, tuple)):
             return [ValidationIssue(path=path, message="Expected array.")]
         min_items = schema.get("minItems")
         max_items = schema.get("maxItems")
@@ -121,7 +121,7 @@ def _validate_type(value: Any, schema: dict[str, Any], *, path: str) -> list[Val
         if any(_matches_type(value, item_type) for item_type in schema_type):
             if isinstance(value, dict) and schema.get("properties"):
                 issues.extend(_validate_required(value, {**schema, "type": "object"}, path=path))
-            elif isinstance(value, list) and schema.get("items"):
+            elif isinstance(value, (list, tuple)) and schema.get("items"):
                 issues.extend(_validate_required(value, {**schema, "type": "array"}, path=path))
             return issues
         return [ValidationIssue(path=path, message=f"Expected one of {schema_type!r}.")]
@@ -137,7 +137,7 @@ def _validate_type(value: Any, schema: dict[str, Any], *, path: str) -> list[Val
         issues.append(ValidationIssue(path=path, message=f"Value must be >= {schema['minimum']}."))
     if schema_type == "number" and "minimum" in schema and isinstance(value, (int, float)) and value < schema["minimum"]:
         issues.append(ValidationIssue(path=path, message=f"Value must be >= {schema['minimum']}."))
-    if isinstance(value, list):
+    if isinstance(value, (list, tuple)):
         min_items = schema.get("minItems")
         max_items = schema.get("maxItems")
         if min_items is not None and len(value) < min_items:
@@ -154,7 +154,7 @@ def _validate_type(value: Any, schema: dict[str, Any], *, path: str) -> list[Val
 def _matches_type(value: Any, schema_type: str) -> bool:
     return {
         "object": isinstance(value, dict),
-        "array": isinstance(value, list),
+        "array": isinstance(value, (list, tuple)),
         "string": isinstance(value, str),
         "integer": isinstance(value, int) and not isinstance(value, bool),
         "number": isinstance(value, (int, float)) and not isinstance(value, bool),
