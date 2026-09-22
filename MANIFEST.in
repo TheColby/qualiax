@@ -1,0 +1,14 @@
+# Source distribution contents: everything needed to build the package and
+# run its test suite from an unpacked sdist (tests only need tests/fixtures).
+include LICENSE README.md pyproject.toml
+include qualiax/py.typed
+recursive-include tests *.py *.json
+
+# Local clutter that must never ship.
+prune .venv
+prune build
+prune dist
+prune demo_out
+prune qualiax.egg-info
+exclude results.json uv.lock sample.wav test_synthetic.py
+global-exclude __pycache__ *.py[cod] .DS_Store
