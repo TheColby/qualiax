@@ -600,18 +600,16 @@ def test_mos_proxies_never_improve_when_noise_is_added(sig):
     assert scores[0][3] > scores[-1][3]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "P.563 proxy pins to its 1.0 floor on clean wideband speech: energy below "
-        "200 Hz (a normal male F0 and its first harmonic) is scored as 'rumble' and "
-        "only 300-3400 Hz counts as speech, as if the input were already "
-        "telephone-band filtered. Retuning the cue bands is an owner decision."
-    ),
-)
 def test_p563_proxy_scores_clean_speech_above_the_floor(sample_speech):
     audio, sr = sample_speech
     assert M._compute_p563_proxy(audio, sr).value >= 3.0
+
+
+def test_p563_proxy_still_penalizes_sub_f0_rumble(sample_speech):
+    audio, sr = sample_speech
+    t = np.arange(audio.size) / sr
+    rumble = 0.3 * np.sin(2 * np.pi * 40 * t)
+    assert M._compute_p563_proxy(audio + rumble, sr).value < M._compute_p563_proxy(audio, sr).value - 0.3
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -1629,9 +1629,10 @@ def _compute_p563_proxy(mono: NDArray, sr: int) -> MetricResult:
         if active.sum() == 0:
             return MetricResult("P.563 Proxy Score", None, "", "No active frames", "perceptual")
 
-        # Frequency balance: narrowband speech should live mostly in 300–3400 Hz
-        speech_idx = (f >= 300) & (f <= 3400)
-        rumble_idx = f < 200
+        # Frequency balance. The speech band starts at 80 Hz because a male F0 and its
+        # first harmonic sit below 300 Hz; only energy under the lowest F0 is rumble.
+        speech_idx = (f >= 80) & (f <= 3400)
+        rumble_idx = f < 80
         hiss_idx = f > 3400
         speech_energy = float(power[speech_idx, :].sum()) if speech_idx.any() else 0.0
         rumble_energy = float(power[rumble_idx, :].sum()) if rumble_idx.any() else 0.0
