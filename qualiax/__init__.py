@@ -1,7 +1,14 @@
 """qualiax — Perceptual Speech & Audio Quality Analyzer"""
 
 from .api import AnalysisResult, PathLike, analyze, analyze_async, analyze_many, analyze_one
-from .calibration import CalibrationCase, calibrate_labels, confidence_interval, consistency_report
+from .calibration import (
+    CalibrationCase,
+    calibrate_labels,
+    cases_from_results,
+    confidence_interval,
+    consistency_report,
+    variant_consistency,
+)
 from .contracts import get_json_schema
 from .dataset_intelligence import audit_dataset
 from .insights import (
@@ -18,7 +25,9 @@ from .models import DiagnosticEntry, FileResult, GroupHealth, MetricResult, Prov
 from .migrations import (
     ExitCode,
     MigrationRegistry,
+    QualiaxDeprecationWarning,
     build_asset_lock,
+    load_asset_lock,
     migrate_report,
     verify_asset_lock,
     warn_deprecated,
@@ -30,7 +39,14 @@ from .metrics import (
     unregister_metric_group,
 )
 from .presets import TaskPreset, available_presets, get_preset, lint_preset
-from .operations import AlertPolicy, DriftHistory, RollingMetricWindow, prometheus_metrics, send_webhook
+from .operations import (
+    AlertPolicy,
+    DriftHistory,
+    RollingMetricWindow,
+    deliver_alert,
+    prometheus_metrics,
+    send_webhook,
+)
 from .performance import (
     AnalysisCache,
     DistributedAdapter,
@@ -38,9 +54,11 @@ from .performance import (
     benchmark_budget,
     incremental_sources,
     iter_audio_chunks,
+    snapshot_signatures,
     source_signature,
 )
 from .plugins import PLUGIN_API_VERSION, PluginManager
+from .provenance import model_asset_paths
 from .release import dependency_inventory, release_readiness, reproducibility_manifest, write_reproducibility_manifest
 from .repair import RepairPlan, apply_repair_plan, build_repair_plan, evaluate_repair
 from .review import ReviewStore
@@ -81,6 +99,8 @@ __all__ = [
     "calibrate_labels",
     "confidence_interval",
     "consistency_report",
+    "cases_from_results",
+    "variant_consistency",
     "audit_dataset",
     "available_metric_groups",
     "register_metric_group",
@@ -92,6 +112,9 @@ __all__ = [
     "build_asset_lock",
     "verify_asset_lock",
     "write_asset_lock",
+    "load_asset_lock",
+    "QualiaxDeprecationWarning",
+    "model_asset_paths",
     "TaskPreset",
     "available_presets",
     "get_preset",
@@ -103,6 +126,7 @@ __all__ = [
     "AlertPolicy",
     "prometheus_metrics",
     "send_webhook",
+    "deliver_alert",
     "AnalysisCache",
     "DistributedAdapter",
     "LocalExecutorAdapter",
@@ -110,6 +134,7 @@ __all__ = [
     "incremental_sources",
     "iter_audio_chunks",
     "benchmark_budget",
+    "snapshot_signatures",
     "PLUGIN_API_VERSION",
     "PluginManager",
     "RepairPlan",

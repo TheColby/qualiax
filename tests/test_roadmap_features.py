@@ -150,8 +150,9 @@ def test_migration_and_release_readiness(tmp_path):
         supported_python=("3.9", "3.10", "3.11", "3.12"),
     )
 
-    assert migrated[0]["schema_version"]
+    assert migrated[0]["schema_version"] == qualiax.OUTPUT_SCHEMA_VERSION
     assert migrated[0]["diagnostics"] == []
+    assert qualiax.validate_report_payload(migrated) == []
     assert ExitCode.QUALITY_GATE_FAILED == 2
     assert readiness["ready"] is True
     assert readiness["support_matrix"]["python"] == ["3.9", "3.10", "3.11", "3.12"]
