@@ -10,9 +10,12 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from statistics import mean
-from typing import Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable
 
 from .models import FileResult, MetricResult
+
+if TYPE_CHECKING:
+    from .plugins import PluginManager
 
 INSIGHT_SCHEMA_VERSION = "1.0"
 
@@ -96,6 +99,8 @@ _FINGERPRINT_FEATURES = {
 _NEAR_CLIPPED_METRIC = "Near-Clipped Samples"
 _CLIPPING_FLAG_METRIC = "Clipping Detected"
 _DROPOUT_METRIC = "Detected Dropouts"
+# Assumed confidence for rule and plugin labels that don't state one.
+_DEFAULT_LABEL_CONFIDENCE = 0.9
 
 KNOWN_INSIGHT_FEATURES = frozenset(_FINGERPRINT_FEATURES.values())
 _VALID_LABEL_SEVERITIES = ("info", "warn", "fail")
@@ -119,8 +124,15 @@ def enrich_results(
     fingerprint_weights: dict[str, float] | None = None,
     preset: str | None = None,
     insight_rules_path: str | Path | None = None,
+    plugins: PluginManager | None = None,
 ) -> list[FileResult]:
-    """Attach composite insight payloads to file results in place."""
+    """Attach composite insight payloads to file results in place.
+
+    With ``plugins``, its label providers run alongside the built-in labels, so
+    their labels drive repair suggestions, CI gates, and triage. Plugin labels
+    already on a result (from an earlier ``apply_label_providers`` or report)
+    are kept unless the same provider runs again.
+    """
     baseline = baseline_results or _load_baseline_results(baseline_path)
     baseline_profile = _profile(baseline) if baseline else {}
     baseline_meta = _baseline_metadata(baseline_profile, baseline_path, baseline)
@@ -128,7 +140,13 @@ def enrich_results(
     last_features: dict[str, float] | None = None
     custom_rules = _load_insight_rules(insight_rules_path)
 
+    rerun_sources = {f"plugin:{name}" for name in plugins.label_providers} if plugins else set()
     for result in results:
+        carried_labels = [
+            label
+            for label in (result.insights or {}).get("defect_labels", [])
+            if str(label.get("source", "")).startswith("plugin:") and label.get("source") not in rerun_sources
+        ]
         features, metric_lookup = _result_features(result)
         fingerprint = _quality_fingerprint(
             features,
@@ -147,6 +165,9 @@ def enrich_results(
             custom_rules,
         )
         defect_labels.extend(custom_labels)
+        defect_labels.extend(carried_labels)
+        if plugins is not None:
+            defect_labels.extend(plugins.collect_labels(result)[0])
         baseline_comparison = _baseline_comparison(features, baseline_profile, baseline_meta)
         drift_monitor = _drift_monitor(features, previous_features) if drift else {}
         ci_checks = _ci_checks(defect_labels, baseline_comparison, custom_ci_fail) if ci else []
@@ -184,6 +205,7 @@ def enrich_existing_report(
     fingerprint_weights: dict[str, float] | None = None,
     preset: str | None = None,
     insight_rules_path: str | Path | None = None,
+    plugins: PluginManager | None = None,
 ) -> list[FileResult]:
     """Enrich an existing JSON/JSONL report without re-reading audio."""
     results = _load_report_results(input_path)
@@ -197,6 +219,7 @@ def enrich_existing_report(
         fingerprint_weights=fingerprint_weights,
         preset=preset,
         insight_rules_path=insight_rules_path,
+        plugins=plugins,
     )
     from .reporter import JsonReporter
 
@@ -404,6 +427,7 @@ def _load_report_results(path: str | Path | None, *, role: str = "report") -> li
                 confidence_notes=list(item.get("confidence_notes", [])),
                 error=item.get("error"),
                 metrics=metrics,
+                insights=dict(item.get("insights") or {}),
             )
         )
     return loaded
@@ -618,7 +642,7 @@ def _apply_custom_rules(
         label = _label(
             str(rule.get("id", "custom_rule")),
             str(rule.get("severity", "warn")),
-            float(rule.get("confidence", 0.9)),
+            float(rule.get("confidence", _DEFAULT_LABEL_CONFIDENCE)),
             str(rule.get("message", f"{feature} violated custom rule")),
             metric_lookup.get(feature),
         )
@@ -1051,7 +1075,8 @@ def _attach_triage(results: list[FileResult]) -> None:
         reasons = []
         for label in result.insights.get("defect_labels", []):
             severity = label.get("severity")
-            confidence = float(label.get("confidence", 0.0))
+            confidence = label.get("confidence")
+            confidence = _DEFAULT_LABEL_CONFIDENCE if confidence is None else float(confidence)
             if severity == "fail":
                 score += 50.0 * confidence
             elif severity == "warn":

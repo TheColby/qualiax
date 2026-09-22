@@ -29,6 +29,8 @@ from .insights import (
     validate_insights_report,
 )
 from .metrics import available_metric_groups
+from .performance import AnalysisCache, analysis_cache_config, analyze_with_cache
+from .plugins import PluginManager
 from .migrations import ExitCode
 from .presets import available_presets, get_preset, lint_preset
 from .reporter import ConsoleReporter, JsonReporter, JsonlReporter, CsvReporter, HtmlReporter, MarkdownReporter
@@ -202,6 +204,12 @@ def _most_severe(*codes: ExitCode) -> ExitCode:
               help="Export WAV snippets for flagged insight segments into this directory.")
 @click.option("--insights-summary", type=click.Path(), default=None,
               help="Write compact pipeline-oriented insights JSON summary.")
+@click.option("--cache", "cache_dir", type=click.Path(file_okay=False), default=None,
+              help="Reuse results for unchanged files from this cache directory "
+                   "(keyed by file size and mtime, analysis options, and qualiax version).")
+@click.option("--plugins", "use_plugins", is_flag=True,
+              help="Discover installed qualiax plugins (entry points in 'qualiax.plugins') "
+                   "and run their label providers.")
 def main(
     paths: tuple[str, ...],
     silent: bool,
@@ -240,6 +248,8 @@ def main(
     insight_rules: Optional[str],
     insight_snippets: Optional[str],
     insights_summary: Optional[str],
+    cache_dir: Optional[str],
+    use_plugins: bool,
 ) -> None:
     """
     \b
@@ -265,6 +275,8 @@ def main(
       qualiax diff before.json after.json --format markdown
       qualiax *.wav --metrics basic,loudness,spectral --no-color
     """
+    plugin_manager = _discover_plugins(silent=silent) if use_plugins else None
+
     if paths and paths[0] == "insights":
         _run_insights_subcommand(
             args=paths[1:],
@@ -278,6 +290,7 @@ def main(
             fingerprint_sensitivity=fingerprint_sensitivity,
             preset=preset,
             insight_rules=insight_rules,
+            plugins=plugin_manager,
         )
         return
 
@@ -304,9 +317,12 @@ def main(
             or insight_rules
             or insight_snippets
             or insights_summary
+            or cache_dir
+            or use_plugins
         ):
             raise click.UsageError(
-                "diff mode does not support segment, microphone, watch, lint, validation, or insights options."
+                "diff mode does not support segment, microphone, watch, lint, validation, insights, cache, "
+                "or plugin options."
             )
         _run_diff(
             diff_args=paths[1:],
@@ -342,6 +358,8 @@ def main(
         raise click.UsageError("--mic-seconds cannot be combined with input paths.")
     if watch and mic_seconds is not None:
         raise click.UsageError("--watch cannot be combined with --mic-seconds.")
+    if watch and cache_dir:
+        raise click.UsageError("--cache is not supported with --watch.")
     if not paths and mic_seconds is None and not lint_rules:
         raise click.UsageError("Provide at least one input path, use '-', or set --mic-seconds.")
     _check_insight_options(
@@ -666,9 +684,12 @@ def main(
                                 fingerprint_sensitivity=fingerprint_sensitivity,
                                 preset=preset,
                                 insight_rules_path=insight_rules,
+                                plugins=plugin_manager,
                             )
                             if insight_snippets:
                                 _export_snippets(aggregate_results, insight_snippets, force=force, session_paths=snippet_session)
+                        elif plugin_manager is not None:
+                            plugin_manager.apply_label_providers(batch_results)
                         _write_sidecars(batch_results, allow_overwrite=force)
                         if out_fmt == "jsonl":
                             _write_output(batch_results, allow_overwrite=True, append=True)
@@ -686,8 +707,20 @@ def main(
                     click.echo("Watch mode stopped.", err=True)
             sys.exit(exit_code)
 
+        cache = AnalysisCache(cache_dir) if cache_dir else None
+        if cache is not None and stdin_paths:
+            cache = None
+            if not silent:
+                click.echo("[warn] --cache is ignored for stdin and microphone input.", err=True)
         try:
-            results = _normalize_results(analyzer.analyze_all(all_files, on_progress=_on_progress))
+            results = _normalize_results(
+                analyze_with_cache(
+                    all_files,
+                    lambda files: analyzer.analyze_all(files, on_progress=_on_progress),
+                    cache,
+                    analysis_cache_config(analyzer) if cache is not None else {},
+                )
+            )
         except Exception as exc:
             if not strict:
                 raise
@@ -709,9 +742,12 @@ def main(
                 fingerprint_sensitivity=fingerprint_sensitivity,
                 preset=preset,
                 insight_rules_path=insight_rules,
+                plugins=plugin_manager,
             )
             if insight_snippets:
                 _export_snippets(results, insight_snippets, force=force)
+        elif plugin_manager is not None:
+            plugin_manager.apply_label_providers(results)
         _write_sidecars(results, allow_overwrite=force)
         _write_output(results, allow_overwrite=force)
         _write_scorecard(results, allow_overwrite=force)
@@ -726,11 +762,20 @@ def main(
                 pass
 
 
+def _discover_plugins(*, silent: bool) -> PluginManager:
+    manager = PluginManager()
+    manager.discover()
+    if not silent:
+        for failure in manager.discovery_failures:
+            click.echo(
+                f"[warn] Plugin {failure['plugin']!r} was skipped ({failure['stage']}): {failure['error']}",
+                err=True,
+            )
+    return manager
+
+
 def _parse_metric_groups(metrics: Optional[str], preset_groups: tuple[str, ...] | None = None) -> set[str]:
-    valid = {
-        "basic", "loudness", "spectral", "temporal", "noise", "speech",
-        "perceptual", "prosody", "psychoacoustic", "speaker", "all",
-    }
+    valid = set(available_metric_groups()) | {"all"}
     if not metrics:
         if preset_groups:
             return set(preset_groups)
@@ -799,6 +844,7 @@ def _run_insights_subcommand(
     fingerprint_sensitivity: str,
     preset: Optional[str],
     insight_rules: Optional[str],
+    plugins: Optional[PluginManager] = None,
 ) -> None:
     if args and args[0] == "validate":
         if len(args) != 2:
@@ -832,6 +878,7 @@ def _run_insights_subcommand(
             fingerprint_sensitivity=fingerprint_sensitivity,
             preset=preset,
             insight_rules_path=insight_rules,
+            plugins=plugins,
         )
     except InsightInputError as exc:
         raise click.ClickException(str(exc)) from exc

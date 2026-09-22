@@ -103,24 +103,36 @@ class PluginManager:
         label_count = 0
         failure_count = 0
         for result in results:
-            for name, produced, failure in self._run_providers(result):
-                if failure is not None:
-                    failure_count += 1
-                    result.diagnostics.append(
-                        DiagnosticEntry(
-                            code="plugin_label_provider_failed",
-                            severity="warn",
-                            source="plugin",
-                            message=f"Label provider {name!r} failed: {failure['error']}",
-                            context={"plugin": name},
-                        )
-                    )
-                    continue
-                if produced:
-                    merged = result.insights.setdefault("defect_labels", [])
-                    merged.extend(_normalize_label(label, name) for label in produced)
-                    label_count += len(produced)
+            labels, failures = self.collect_labels(result)
+            failure_count += failures
+            if labels:
+                result.insights.setdefault("defect_labels", []).extend(labels)
+                label_count += len(labels)
         return {"labels": label_count, "failures": failure_count}
+
+    def collect_labels(self, result: FileResult) -> tuple[list[dict], int]:
+        """Run every label provider on ``result`` without merging anything.
+
+        Returns the normalized labels and the number of failed providers; each
+        failure is recorded as a ``plugin`` diagnostic on ``result``.
+        """
+        labels: list[dict] = []
+        failures = 0
+        for name, produced, failure in self._run_providers(result):
+            if failure is not None:
+                failures += 1
+                result.diagnostics.append(
+                    DiagnosticEntry(
+                        code="plugin_label_provider_failed",
+                        severity="warn",
+                        source="plugin",
+                        message=f"Label provider {name!r} failed: {failure['error']}",
+                        context={"plugin": name},
+                    )
+                )
+                continue
+            labels.extend(_normalize_label(label, name) for label in produced)
+        return labels, failures
 
     def render(self, name: str, results: list[FileResult]) -> str:
         key = _name(name)
