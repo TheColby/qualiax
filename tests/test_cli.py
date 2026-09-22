@@ -745,5 +745,6 @@ def test_cli_json_to_stdout_validates_against_contract(tmp_path):
     result = CliRunner().invoke(main, [str(wav), "--metrics", "basic,spectral", "--format", "json"])
 
     assert result.exit_code == 0, result.output
-    payload = json.loads(result.stdout[result.stdout.index("["):])
+    # Click < 8.2 (the only option on Python 3.9) mixes the stderr progress bar into result.stdout.
+    payload = json.loads(result.stdout[result.stdout.index("[\n"):])
     assert validate_report_payload(payload) == []
