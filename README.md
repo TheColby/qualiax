@@ -124,18 +124,22 @@ To generate a small set of demo outputs end-to-end:
 
 ### Quick Install
 
-From the project root:
+From PyPI:
 
 ```bash
 # Minimal — WAV support only
-pip install -e .
+pip install qualiax
 
 # Recommended — adds MP3, FLAC, OGG, AAC support
-pip install -e ".[audio]"
+pip install "qualiax[audio]"
 
 # Full — stable extras for formats, reports, learned-MOS hooks, watch mode, and microphone capture
-pip install -e ".[all]"
+pip install "qualiax[all]"
 ```
+
+`pesq` (pulled in by the `perceptual` and `all` extras) has no prebuilt wheels, so those extras need a C compiler.
+
+From a source checkout, use an editable install instead, e.g. `pip install -e ".[audio,dev]"`.
 
 After installation, `qualiax` is available in the environment you installed it into.
 
@@ -145,7 +149,7 @@ After installation, `qualiax` is available in the environment you installed it i
 ./install.sh
 ```
 
-The install script is a thin wrapper around the extras defined in [pyproject.toml](/Users/cleider/dev/qualiax/pyproject.toml). It creates or reuses a local `.venv` by default, installs `qualiax` from the current checkout, and avoids automatic `sudo` or package-manager changes.
+The install script is a thin wrapper around the extras defined in [pyproject.toml](https://github.com/TheColby/qualiax/blob/main/pyproject.toml). It creates or reuses a local `.venv` by default, installs `qualiax` from the current checkout, and avoids automatic `sudo` or package-manager changes.
 
 Make it executable first if needed:
 
@@ -484,7 +488,7 @@ The package can now be used directly from Python without shelling out to the CLI
 
 ### Sync API
 
-Analyze one file and get back a list of typed [FileResult](/Users/cleider/dev/qualiax/qualiax/models.py) objects:
+Analyze one file and get back a list of typed [FileResult](https://github.com/TheColby/qualiax/blob/main/qualiax/models.py) objects:
 
 ```python
 from qualiax import analyze
