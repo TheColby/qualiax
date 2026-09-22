@@ -609,7 +609,7 @@ reviews = ReviewStore("reviews.json")
 reviews.decide(results[0].path, "needs-review", reviewer="qa-team")
 
 cache = AnalysisCache(".qualiax-cache")
-cache.put(results[0].source_file, results[0].to_dict())
+cache.put(results[0].path, results[0].to_dict())
 
 gate = release_readiness(
     version="1.0.0",
