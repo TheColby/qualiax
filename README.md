@@ -612,7 +612,7 @@ cache = AnalysisCache(".qualiax-cache")
 cache.put(results[0].path, results[0].to_dict())
 
 gate = release_readiness(
-    version="1.0.0",
+    version="1.1.0",
     tests_passed=True,
     schemas_valid=True,
     docs_present=True,
