@@ -88,6 +88,7 @@ qualiax = "qualiax.cli:main"
 Homepage = "https://github.com/TheColby/qualiax"
 Repository = "https://github.com/TheColby/qualiax"
 Issues = "https://github.com/TheColby/qualiax/issues"
+Changelog = "https://github.com/TheColby/qualiax/blob/main/ROADMAP.md"
 
 [tool.setuptools]
 package-dir = {"" = "."}

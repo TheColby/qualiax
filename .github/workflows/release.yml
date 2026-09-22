@@ -34,11 +34,14 @@ jobs:
           python -m build
           python -m twine check --strict dist/*
 
+      # Run from outside the checkout so Python imports the installed wheel, not ./qualiax.
       - name: Smoke-test the built wheel
         run: |
           python -m pip install dist/*.whl
+          cd "$RUNNER_TEMP"
           qualiax --help > /dev/null
-          python -c "import qualiax; print(qualiax.__version__)"
+          python -m qualiax --help > /dev/null
+          python -c "import qualiax, qualiax.metrics as m; assert m._proxy_calibration(), 'calibration data missing from wheel'; print(qualiax.__file__, qualiax.__version__)"
 
       - uses: actions/upload-artifact@v7
         with:
@@ -62,3 +65,20 @@ jobs:
           path: dist/
 
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    name: Create GitHub release
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+
+      - name: Create the release with the published files
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes --title "qualiax ${GITHUB_REF_NAME#v}"
