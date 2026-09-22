@@ -1331,12 +1331,13 @@ def _compute_aecmos(mono: NDArray, sr: int) -> MetricResult:
                 "perceptual",
                 higher_is_better=True,
                 reference_range=(3.5, 5.0),
-                warning=proxy_warn if aecmos_score < 4.0 else None,
             ),
             confidence="heuristic",
             calibration_note=(
                 "Not benchmarked: Microsoft's AECMOS needs far-end, microphone, and processed signals, so no "
-                "single-recording reference exists. Treat this as an echo-severity heuristic."
+                "single-recording reference exists. Speech periodicity also raises the autocorrelation tail: on "
+                "echo-free VoiceBank-DEMAND speech it averages 3.5 (10th percentile 2.6), so only much lower "
+                "scores suggest echo."
             ),
         )
     except Exception as e:
