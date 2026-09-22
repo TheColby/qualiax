@@ -284,9 +284,20 @@ class DistributedAdapter(Protocol):
 
 
 class LocalExecutorAdapter:
-    """Executor-compatible adapter that can be swapped for a remote backend."""
+    """Executor-compatible adapter that can be swapped for a remote backend.
+
+    Deprecated: it adds nothing over ``concurrent.futures.Executor.map``.
+    """
 
     def __init__(self, *, max_workers: int | None = None, executor: Executor | None = None):
+        from .migrations import warn_deprecated
+
+        warn_deprecated(
+            "LocalExecutorAdapter",
+            removal_version="2.0.0",
+            alternative="concurrent.futures.Executor.map",
+            stacklevel=3,
+        )
         self.max_workers = max_workers
         self.executor = executor
 

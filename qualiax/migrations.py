@@ -126,7 +126,8 @@ def default_migration_registry() -> MigrationRegistry:
     return registry
 
 
-def warn_deprecated(feature: str, *, removal_version: str, alternative: str = "") -> None:
+def warn_deprecated(feature: str, *, removal_version: str, alternative: str = "", stacklevel: int = 2) -> None:
+    """Emit a :class:`QualiaxDeprecationWarning`; ``stacklevel`` counts from the caller of this function."""
     suffix = f" Use {alternative} instead." if alternative else ""
     warnings.warn(
         QualiaxDeprecationWarning(
@@ -135,7 +136,7 @@ def warn_deprecated(feature: str, *, removal_version: str, alternative: str = ""
             removal_version=removal_version,
             alternative=alternative,
         ),
-        stacklevel=2,
+        stacklevel=stacklevel,
     )
 
 

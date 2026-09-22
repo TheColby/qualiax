@@ -634,7 +634,17 @@ A few behaviors worth knowing:
 - `ReviewStore` re-reads its file before every write, so several stores can share one file, and it
   raises instead of silently starting over when the file is corrupt.
 - `benchmark_budget(...)` counts a baseline metric that is missing from the current run as a failure.
-- `AnalysisCache` is a standalone helper: `analyze()` and the CLI don't consult it yet.
+- Pass `cache=".qualiax-cache"` to `analyze()` (or `--cache DIR` on the CLI) to reuse results for
+  files that haven't changed. Entries are keyed by file size and modification time, the analysis
+  options, and the qualiax version, and results with errors are never cached. Stdin and microphone
+  input bypass the cache, and `--watch` doesn't support it. A custom metric group registered with
+  `register_metric_group` isn't fingerprinted, so clear the cache after changing its code.
+- Plugin label providers run inside `--insights`: pass `plugins=manager` to `analyze()` or
+  `enrich_results()`, or add `--plugins` on the CLI to discover installed entry-point plugins. Their
+  labels feed repair suggestions, CI gates, and triage, and `--metrics` accepts metric groups that
+  plugins register. Discovery is opt-in because it runs third-party code.
+- Deprecated, to be removed in 2.0.0: `LocalExecutorAdapter` (use `concurrent.futures.Executor.map`),
+  `RollingMetricWindow` (use `DriftHistory.window`), and `qualiax.DistributedAdapter`.
 - `ExitCode` provides stable values for automation, and the CLI uses them consistently:
 
   | Code | Name | When |

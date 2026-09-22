@@ -1,4 +1,6 @@
+import pytest
 import qualiax
+from qualiax.migrations import QualiaxDeprecationWarning
 from qualiax.calibration import CalibrationCase, calibrate_labels, confidence_interval, consistency_report
 from qualiax.dataset_intelligence import audit_dataset
 from qualiax.migrations import ExitCode, build_asset_lock, migrate_report, verify_asset_lock
@@ -136,7 +138,8 @@ def test_performance_cache_incremental_chunks_and_budget(tmp_path):
     assert incremental_sources([source], {str(source): (0, 0)}) == [source]
     assert list(iter_audio_chunks(list(range(10)), 4)) == [[0, 1, 2, 3], [4, 5, 6, 7], [8, 9]]
     assert benchmark_budget({"runtime_s": 1.0}, {"runtime_s": 1.1}, max_regression=0.2)["passed"]
-    assert LocalExecutorAdapter(max_workers=2).map(abs, [-1, -2]) == [1, 2]
+    with pytest.warns(QualiaxDeprecationWarning):
+        assert LocalExecutorAdapter(max_workers=2).map(abs, [-1, -2]) == [1, 2]
 
 
 def test_migration_and_release_readiness(tmp_path):
