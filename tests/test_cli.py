@@ -636,3 +636,114 @@ def test_finalize_watch_batch_retries_failures_and_marks_successes(tmp_path):
 
     assert str(good.resolve()) in processed
     assert retries[str(bad.resolve())]["attempts"] == 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Option validation and real end-to-end output
+# ─────────────────────────────────────────────────────────────────────────────
+
+import csv
+import io
+import re
+import wave
+
+import numpy as np
+import pytest
+
+
+def _write_tone_wav(path: Path, seconds: float = 2.3, sr: int = 16_000) -> None:
+    t = np.arange(int(seconds * sr)) / sr
+    audio = 0.3 * np.sin(2 * np.pi * 220 * t) * (0.5 * (1 - np.cos(2 * np.pi * 3 * t)))
+    with wave.open(str(path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sr)
+        wf.writeframes((audio * 32767).astype("<i2").tobytes())
+
+
+@pytest.mark.parametrize(
+    "extra_args, message",
+    [
+        (["--mic-seconds", "1"], "--mic-seconds cannot be combined with input paths"),
+        (["--silent"], "--silent requires --output"),
+        (["--output", "same.json", "--scorecard", "same.json"], "must point to different paths"),
+        (["--segment-seconds", "0", "--output", "o.json"], "--segment-seconds must be greater than 0"),
+        (["--watch-interval", "0", "--output", "o.json"], "--watch-interval must be greater than 0"),
+        (["--watch-debounce", "-1", "--output", "o.json"], "--watch-debounce must be >= 0"),
+        (["--watch-max-pending", "0", "--output", "o.json"], "--watch-max-pending must be greater than 0"),
+        (["--watch"], "--watch only supports directory inputs"),
+    ],
+)
+def test_cli_rejects_invalid_option_combinations(monkeypatch, tmp_path, extra_args, message):
+    monkeypatch.setattr("qualiax.cli.AudioAnalyzer", DummyAnalyzer)
+    monkeypatch.chdir(tmp_path)
+    Path("input.wav").write_bytes(b"audio")
+    result = CliRunner().invoke(main, ["input.wav", *extra_args])
+    assert result.exit_code != 0
+    assert message in result.output
+
+
+def test_cli_requires_an_input():
+    result = CliRunner().invoke(main, [])
+    assert result.exit_code != 0
+    assert "Provide at least one input path" in result.output
+
+
+def test_cli_reports_directory_without_audio(tmp_path):
+    (tmp_path / "notes.txt").write_text("hello")
+    result = CliRunner().invoke(main, [str(tmp_path)])
+    assert result.exit_code == 1
+    assert "No supported audio files found" in result.output
+
+
+@pytest.mark.parametrize("ext, fmt", [(".json", "json"), (".jsonl", "jsonl"), (".csv", "csv"),
+                                      (".html", "html"), (".md", "markdown")])
+def test_cli_real_short_file_writes_every_format_without_nan(tmp_path, ext, fmt):
+    wav = tmp_path / "short.wav"
+    _write_tone_wav(wav)
+    out = tmp_path / f"report{ext}"
+
+    result = CliRunner().invoke(
+        main, [str(wav), "--metrics", "basic,loudness,noise", "--output", str(out), "--silent"]
+    )
+
+    assert result.exit_code == 0, result.output
+    text = out.read_text()
+    assert not re.search(r"\bnan\b", text, re.IGNORECASE), fmt
+    if fmt == "json":
+        payload = json.loads(text, parse_constant=lambda token: pytest.fail(f"literal {token}"))
+        metrics = {m["name"]: m for m in payload[0]["metrics"]}
+        assert metrics["Loudness Range (LRA)"]["value"] is None
+        assert metrics["Loudness Range (LRA)"]["warning"] == metrics["Max Short-Term Loudness"]["warning"]
+    elif fmt == "csv":
+        row = next(csv.DictReader(io.StringIO(text)))
+        assert row["Loudness Range (LRA)"] == ""
+        assert row["Max Short-Term Loudness"] == ""
+        assert float(row["Integrated Loudness (LUFS)"]) < 0
+    elif fmt in {"html", "markdown"}:
+        assert "N/A LU" in text
+
+
+def test_cli_pretty_console_shows_na_not_nan_for_short_file(tmp_path):
+    wav = tmp_path / "short.wav"
+    _write_tone_wav(wav)
+    result = CliRunner().invoke(main, [str(wav), "--metrics", "loudness", "--no-color"])
+
+    assert result.exit_code == 0, result.output
+    assert not re.search(r"\bnan\b", result.output, re.IGNORECASE)
+    lra_line = next(line for line in result.output.splitlines() if "Loudness Range (LRA)" in line)
+    st_line = next(line for line in result.output.splitlines() if "Max Short-Term Loudness" in line)
+    assert lra_line.rstrip().endswith("N/A LU")
+    assert st_line.rstrip().endswith("N/A LUFS")
+
+
+def test_cli_json_to_stdout_validates_against_contract(tmp_path):
+    from qualiax.validation import validate_report_payload
+
+    wav = tmp_path / "tone.wav"
+    _write_tone_wav(wav, seconds=1.0)
+    result = CliRunner().invoke(main, [str(wav), "--metrics", "basic,spectral", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout[result.stdout.index("["):])
+    assert validate_report_payload(payload) == []

@@ -248,6 +248,20 @@ class AudioAnalyzer:
         result.confidence_notes = deduped
 
     @staticmethod
+    def _replace_nan_values(metrics: list[MetricResult]) -> None:
+        """Report undefined (NaN) metric values as missing instead of a raw ``nan``.
+
+        Built-in groups already return None for undefined values; this guards
+        custom metric groups so every output format shows N/A / null.
+        """
+        for metric in metrics:
+            value = metric.value
+            if isinstance(value, (float, np.floating)) and np.isnan(value):
+                metric.value = None
+                if not metric.warning:
+                    metric.warning = "Unavailable: value is undefined (NaN) for this input"
+
+    @staticmethod
     def _append_note(result: FileResult, message: str) -> None:
         if message not in result.notes:
             result.notes.append(message)
@@ -493,6 +507,7 @@ class AudioAnalyzer:
                             group="perceptual",
                         )
                     metrics = filtered_metrics
+                self._replace_nan_values(metrics)
                 result.metrics.extend(metrics)
             except Exception as e:
                 if self.strict:
@@ -528,7 +543,11 @@ class AudioAnalyzer:
         if self._ref_audio is None:
             return None, None
         if self._ref_sr != sr:
-            return self._ref_audio, self._ref_sr
+            # Map the segment's time span onto the reference's own sample grid;
+            # returning the whole reference compared every segment with the
+            # start of the reference.
+            sample_start = int(round(sample_start * self._ref_sr / sr))
+            sample_end = int(round(sample_end * self._ref_sr / sr))
         if self._ref_audio.ndim == 1:
             return self._ref_audio[sample_start:sample_end], self._ref_sr
         return self._ref_audio[:, sample_start:sample_end], self._ref_sr

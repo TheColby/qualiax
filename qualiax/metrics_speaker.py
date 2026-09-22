@@ -237,6 +237,59 @@ def compute_cpp(audio: NDArray, sr: int) -> tuple[list[MetricResult], Optional[f
     return results, cpp_mean
 
 
+# ─── Creak (vocal fry) detection ─────────────────────────────────────────────
+
+_CREAK_F0_HZ = 80.0
+_CREAK_MIN_F0_HZ = 20.0
+_CREAK_MAX_F0_HZ = 500.0
+_CREAK_VOICING_THRESHOLD = 0.5
+
+
+def _frame_dominant_f0(segment: NDArray, win_len: int, sr: int, tau_min: int, tau_max: int) -> Optional[float]:
+    """Dominant F0 of ``segment[:win_len]`` via the normalized cross-correlation (NCCF).
+
+    The NCCF compares a fixed window with a lagged copy of equal length, so it
+    does not taper with lag (unlike the biased autocorrelation). Every multiple
+    of the period correlates almost equally well, so the *shortest* lag whose
+    peak is within 90% of the best one is taken as the period.
+    """
+    ref = segment[:win_len]
+    ref_energy = float(np.dot(ref, ref))
+    if ref_energy <= 0:
+        return None
+    num = np.correlate(segment[: win_len + tau_max], ref, mode="valid")  # lags 0..tau_max
+    sq = np.concatenate([[0.0], np.cumsum(segment[: win_len + tau_max] ** 2)])
+    lag_energy = sq[win_len:win_len + tau_max + 1] - sq[: tau_max + 1]
+    nccf = num / np.sqrt(ref_energy * np.maximum(lag_energy, 1e-20))
+    region = nccf[tau_min:tau_max + 1]
+    peaks, props = find_peaks(region, height=_CREAK_VOICING_THRESHOLD)
+    if len(peaks) == 0:
+        return None
+    heights = props["peak_heights"]
+    best = int(peaks[np.argmax(heights >= 0.9 * np.max(heights))])
+    return sr / float(tau_min + best)
+
+
+def _count_creaky_frames(mono: NDArray, sr: int) -> tuple[int, int]:
+    """Return (creaky_frames, active_frames): active frames whose F0 is below 80 Hz."""
+    win_len = int(0.025 * sr)
+    hop_len = int(0.010 * sr)
+    tau_min = max(1, int(sr / _CREAK_MAX_F0_HZ))
+    tau_max = int(sr / _CREAK_MIN_F0_HZ)
+    span = win_len + tau_max
+    creak_count = 0
+    active_count = 0
+    for start in range(0, len(mono) - span + 1, hop_len):
+        segment = np.asarray(mono[start:start + span], dtype=np.float64)
+        if float(np.sqrt(np.mean(segment[:win_len] ** 2))) < 1e-3:
+            continue
+        active_count += 1
+        f0 = _frame_dominant_f0(segment, win_len, sr, tau_min, tau_max)
+        if f0 is not None and f0 < _CREAK_F0_HZ:
+            creak_count += 1
+    return creak_count, active_count
+
+
 # ─── Voice quality ────────────────────────────────────────────────────────────
 
 def compute_voice_quality(audio: NDArray, sr: int) -> list[MetricResult]:
@@ -261,30 +314,7 @@ def compute_voice_quality(audio: NDArray, sr: int) -> list[MetricResult]:
         ))
 
     # Creakiness / vocal fry: F0 < 80 Hz in otherwise active frames
-    frame_len = int(0.025 * sr)
-    hop_len   = int(0.010 * sr)
-    frames    = _frame_signal(mono, frame_len, hop_len)
-
-    creak_count  = 0
-    active_count = 0
-    tau_lo       = max(1, sr // 80)    # 80 Hz
-    tau_hi       = min(frame_len - 1, sr // 20)  # 20 Hz
-
-    for frame in frames:
-        rms = float(np.sqrt(np.mean(frame ** 2)))
-        if rms < 1e-3:
-            continue
-        active_count += 1
-
-        if tau_hi <= tau_lo:
-            continue
-        r = np.correlate(frame, frame, mode='full')
-        r = r[len(r) // 2:]
-        if r[0] <= 0:
-            continue
-        r_norm = r / (r[0] + 1e-14)
-        if float(np.max(r_norm[tau_lo:tau_hi])) > 0.40:
-            creak_count += 1
+    creak_count, active_count = _count_creaky_frames(mono, sr)
 
     if active_count > 0:
         creak_ratio = creak_count / active_count

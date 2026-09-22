@@ -90,31 +90,37 @@ def compute_f0_track_with_backend(
         f0_arr, strength_arr = crepe_result
         return f0_arr, strength_arr, "crepe"
 
-    frame_len = int(0.025 * sr)
+    frame_len = _f0_frame_len(sr, f0_min)
     hop_len   = int(0.010 * sr)
     tau_min   = max(1, int(sr / f0_max))
-    tau_max   = int(sr / f0_min)
+    tau_max   = int(math.ceil(sr / f0_min))
 
     if len(audio) < frame_len:
         return np.array([]), np.array([]), "autocorrelation"
 
     frames = _frame_signal(audio, frame_len, hop_len)
     win    = np.hanning(frame_len)
+    n_pad  = 2 * frame_len
+    fw     = np.fft.rfft(win, n=n_pad)
+    acf_w  = np.fft.irfft(fw * np.conj(fw), n=n_pad)[:frame_len]
+    acf_w  = np.maximum(acf_w / acf_w[0], 1e-12)
 
     f0_out  = np.zeros(len(frames))
     str_out = np.zeros(len(frames))
 
     for i, frame in enumerate(frames):
-        windowed = frame * win
-        # Normalized autocorrelation via FFT
-        n_pad = 2 * frame_len
+        windowed = (frame - np.mean(frame)) * win
+        # Normalized autocorrelation via FFT, divided by the window's own
+        # autocorrelation (Boersma 1993). Without this correction the biased
+        # estimate tapers with lag: low voices (< ~110 Hz) never reach the
+        # voicing threshold and every peak is pulled towards shorter lags.
         fft   = np.fft.rfft(windowed, n=n_pad)
-        acf   = np.fft.irfft(fft * np.conj(fft))[:frame_len]
+        acf   = np.fft.irfft(fft * np.conj(fft), n=n_pad)[:frame_len]
         if acf[0] < 1e-10:
             continue
-        acf /= acf[0]
+        acf = (acf / acf[0]) / acf_w
 
-        if tau_max >= len(acf):
+        if tau_max + 1 >= len(acf):
             continue
 
         region = acf[tau_min : tau_max + 1]
@@ -125,12 +131,28 @@ def compute_f0_track_with_backend(
         if len(peaks) == 0:
             continue
 
-        best      = peaks[np.argmax(props["peak_heights"])]
-        strength  = float(region[best])
+        heights   = props["peak_heights"]
+        # Prefer the shortest lag whose peak is (nearly) as strong as the best
+        # one, so period multiples (octave errors) do not win on noise.
+        best      = int(peaks[np.argmax(heights >= 0.9 * np.max(heights))])
+        strength  = float(min(region[best], 1.0))
+        # Parabolic interpolation of the peak gives sub-sample lag resolution.
+        lag = float(tau_min + best)
+        k = tau_min + best
+        if 0 < k < len(acf) - 1:
+            y0, y1, y2 = acf[k - 1], acf[k], acf[k + 1]
+            denom = y0 - 2.0 * y1 + y2
+            if denom < 0:
+                lag += float(np.clip(0.5 * (y0 - y2) / denom, -0.5, 0.5))
         str_out[i] = strength
-        f0_out[i]  = sr / (tau_min + best)
+        f0_out[i]  = sr / lag
 
     return f0_out, str_out, "autocorrelation"
+
+
+def _f0_frame_len(sr: int, f0_min: float = 60.0) -> int:
+    """Analysis frame covering three periods of the lowest pitch (Boersma 1993), >= 25 ms."""
+    return max(int(0.025 * sr), int(math.ceil(3.0 * sr / f0_min)))
 
 
 def compute_f0_track(
@@ -162,25 +184,37 @@ def _jitter_local(f0_arr: NDArray) -> Optional[float]:
     return float(np.mean(diffs) / (np.mean(periods) + 1e-14))
 
 
-def _shimmer_local(audio: NDArray, sr: int, f0_arr: NDArray) -> Optional[float]:
-    """Local shimmer (relative amplitude perturbation) on voiced frames."""
-    frame_len = int(0.025 * sr)
-    hop_len   = int(0.010 * sr)
-    voiced_idx = np.where(f0_arr > 0)[0]
-    if len(voiced_idx) < 4:
-        return None
+def _voiced_frame_rms(audio: NDArray, sr: int, f0_arr: NDArray) -> list[float]:
+    """Pitch-synchronous RMS amplitude of each voiced analysis frame.
 
-    rms_vals = []
-    for i in voiced_idx:
-        start = i * hop_len
-        end   = start + frame_len
+    Each window spans a whole number of pitch periods (about 25 ms worth) centred
+    on the F0 analysis frame. A fixed 25 ms window holds a fractional number of
+    periods, so its RMS ripples with the waveform phase and a perfectly steady
+    voice would read several percent of spurious shimmer.
+    """
+    hop_len    = int(0.010 * sr)
+    target_len = int(0.025 * sr)
+    f0_frame   = _f0_frame_len(sr)
+    rms_vals: list[float] = []
+    for i in np.where(f0_arr > 0)[0]:
+        period = sr / float(f0_arr[i])
+        n_periods = max(1, int(target_len // period))
+        seg_len = max(1, int(round(n_periods * period)))
+        start = int(i * hop_len + max(0, (f0_frame - seg_len) // 2))
+        end = start + seg_len
         if end > len(audio):
             break
-        seg = audio[start:end]
-        rms = float(np.sqrt(np.mean(seg ** 2)))
+        rms = float(np.sqrt(np.mean(audio[start:end] ** 2)))
         if rms > 1e-6:
             rms_vals.append(rms)
+    return rms_vals
 
+
+def _shimmer_local(audio: NDArray, sr: int, f0_arr: NDArray) -> Optional[float]:
+    """Local shimmer (relative amplitude perturbation) on voiced frames."""
+    if len(np.where(f0_arr > 0)[0]) < 4:
+        return None
+    rms_vals = _voiced_frame_rms(audio, sr, f0_arr)
     if len(rms_vals) < 4:
         return None
     arr   = np.array(rms_vals)
@@ -214,7 +248,7 @@ def _jitter_ppq5(f0_arr: NDArray) -> Optional[float]:
 
 
 def _jitter_ddp(f0_arr: NDArray) -> Optional[float]:
-    """DDP: mean absolute second difference of periods (= 2× RAP for symmetric windows)."""
+    """DDP: mean absolute second difference of periods (exactly 3x RAP)."""
     voiced = f0_arr[f0_arr > 0]
     if len(voiced) < 5:
         return None
@@ -227,19 +261,8 @@ def _jitter_ddp(f0_arr: NDArray) -> Optional[float]:
 # ─── Extended Shimmer measures ────────────────────────────────────────────────
 
 def _get_voiced_rms(audio: NDArray, sr: int, f0_arr: NDArray) -> Optional[NDArray]:
-    """Per-voiced-frame RMS amplitude array."""
-    frame_len = int(0.025 * sr)
-    hop_len   = int(0.010 * sr)
-    voiced_idx = np.where(f0_arr > 0)[0]
-    rms_vals = []
-    for i in voiced_idx:
-        start = i * hop_len
-        end   = start + frame_len
-        if end > len(audio):
-            break
-        rms = float(np.sqrt(np.mean(audio[start:end] ** 2)))
-        if rms > 1e-6:
-            rms_vals.append(rms)
+    """Per-voiced-frame (pitch-synchronous) RMS amplitude array."""
+    rms_vals = _voiced_frame_rms(audio, sr, f0_arr)
     return np.array(rms_vals) if len(rms_vals) >= 5 else None
 
 

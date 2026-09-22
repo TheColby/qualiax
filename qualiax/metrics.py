@@ -23,16 +23,6 @@ from . import gpu as _gpu  # hardware-accelerated kernels (Metal / CUDA / CPU)
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _safe(fn, *args, name="", **kwargs):
-    """Run fn; return None on any exception."""
-    try:
-        result = fn(*args, **kwargs)
-        return result
-    except Exception as e:
-        warnings.warn(f"Metric '{name}' failed: {e}")
-        return None
-
-
 def _warn_metric_failure(name: str, exc: Exception) -> None:
     warnings.warn(f"Metric '{name}' failed: {exc}")
 
@@ -84,12 +74,16 @@ def compute_basic(audio: NDArray, sr: int, ref_audio=None, ref_sr=None) -> list[
     duration = len(mono) / sr
     n_channels = 1 if audio.ndim == 1 else audio.shape[0]
 
-    peak = float(np.max(np.abs(mono)))
+    # Peak and clipping are facts about the stored samples, so they are taken
+    # over every channel: a downmix hides a clipped or out-of-phase channel.
+    peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+    clipped = bool(np.any(np.abs(audio) >= 0.999))
     peak_db = _db(peak)
     rms_val = _rms(mono)
     rms_db = _db(rms_val)
-    crest_factor = (peak / (rms_val + _eps())) if rms_val > 0 else 0.0
-    crest_db = _db(crest_factor)
+    # Crest factor / dynamic range are undefined (0/0) for digital silence.
+    crest_db = _db(peak / rms_val) if rms_val > 0 and peak > 0 else None
+    dynamic_range = (peak_db - rms_db) if rms_val > 0 and peak > 0 else None
     dc_offset = float(np.mean(mono))
     silence_ratio = float(np.mean(np.abs(mono) < 0.001))
 
@@ -116,13 +110,13 @@ def compute_basic(audio: NDArray, sr: int, ref_audio=None, ref_sr=None) -> list[
         MetricResult("Silence Ratio", silence_ratio * 100, "%",
                      "Percentage of samples below -60 dB (near silence)", "basic",
                      warning="More than 50% silence" if silence_ratio > 0.5 else None),
-        MetricResult("Dynamic Range (simple)", peak_db - rms_db, "dB",
+        MetricResult("Dynamic Range (simple)", dynamic_range, "dB",
                      "Difference between peak and RMS level", "basic"),
         MetricResult("Clipping Detected",
-                     int(np.any(np.abs(mono) >= 0.999)),
+                     int(clipped),
                      "", "1 if any samples appear clipped (>=0.999 full scale)", "basic",
                      higher_is_better=False,
-                     warning="Clipping detected!" if np.any(np.abs(mono) >= 0.999) else None),
+                     warning="Clipping detected!" if clipped else None),
         MetricResult("Zero Crossing Rate", float(np.mean(np.abs(np.diff(np.sign(mono))) > 0)), "crossings/sample",
                      "Rate of sign changes (correlated with pitch/noisiness)", "basic"),
     ]
@@ -222,122 +216,162 @@ def _k_weighting_filter(audio: NDArray, sr: int) -> NDArray:
     return _gpu.k_weighting_filter(audio, sr)
 
 
-def _integrated_loudness_lufs(audio: NDArray, sr: int) -> float:
-    """Compute integrated loudness in LUFS per BS.1770-4."""
-    mono = _to_mono(audio)
-    filtered = _k_weighting_filter(mono, sr)
-
-    # 400ms blocks with 75% overlap
-    block_size = int(0.4 * sr)
-    hop = int(0.1 * sr)
-    if len(filtered) < block_size:
-        return float("nan")
-
-    block_loudnesses = []
-    for start in range(0, len(filtered) - block_size + 1, hop):
-        block = filtered[start:start + block_size]
-        mean_sq = float(np.mean(block ** 2))
-        if mean_sq > 0:
-            block_loudnesses.append(-0.691 + 10 * math.log10(mean_sq))
-
-    if not block_loudnesses:
-        return float("nan")
-
-    # Absolute gate: -70 LUFS
-    gated = [l for l in block_loudnesses if l >= -70.0]
-    if not gated:
-        return float("nan")
-
-    # Relative gate: -10 from ungated mean
-    mean_ungated = -0.691 + 10 * math.log10(np.mean([10 ** (l / 10) for l in gated]))
-    threshold = mean_ungated - 10.0
-    gated2 = [l for l in gated if l >= threshold]
-    if not gated2:
-        return float("nan")
-
-    return -0.691 + 10 * math.log10(np.mean([10 ** (l / 10) for l in gated2]))
+_ABSOLUTE_GATE_LUFS = -70.0
+_MOMENTARY_BLOCK_S = 0.4
+_SHORT_TERM_BLOCK_S = 3.0
+_LOUDNESS_HOP_S = 0.1
 
 
-def _loudness_range(audio: NDArray, sr: int) -> float:
-    """EBU R128 Loudness Range (LRA)."""
-    mono = _to_mono(audio)
-    filtered = _k_weighting_filter(mono, sr)
+def _as_channels(audio: NDArray) -> NDArray:
+    """Return audio as (channels, samples)."""
+    return audio[None, :] if audio.ndim == 1 else audio
 
-    block_size = int(3.0 * sr)
-    hop = int(0.1 * sr)
-    if len(filtered) < block_size:
-        return float("nan")
 
-    block_loudnesses = []
-    for start in range(0, len(filtered) - block_size + 1, hop):
-        block = filtered[start:start + block_size]
-        mean_sq = float(np.mean(block ** 2))
-        if mean_sq > 0:
-            block_loudnesses.append(-0.691 + 10 * math.log10(mean_sq))
+def _k_weighted_channels(audio: NDArray, sr: int) -> NDArray:
+    return np.stack([_k_weighting_filter(ch, sr) for ch in _as_channels(audio)])
 
-    if len(block_loudnesses) < 2:
-        return float("nan")
 
-    # Absolute gate
-    gated = [l for l in block_loudnesses if l >= -70.0]
-    if not gated:
-        return float("nan")
+def _block_energies(filtered: NDArray, sr: int, block_s: float, hop_s: float = _LOUDNESS_HOP_S) -> NDArray:
+    """Channel-summed mean-square energy z of each gating block (BS.1770-4 eq. 3-4).
 
-    # Relative gate
-    mean_g = -0.691 + 10 * math.log10(np.mean([10 ** (l / 10) for l in gated]))
-    gated2 = sorted([l for l in gated if l >= mean_g - 20.0])
+    Channels are summed with unit weights, which is exact for mono, stereo and
+    L/R/C content; surround weights (1.41 for Ls/Rs, LFE excluded) are not
+    applied because the channel layout is unknown.
+    """
+    block = int(round(block_s * sr))
+    hop = int(round(hop_s * sr))
+    n = filtered.shape[-1]
+    if block <= 0 or hop <= 0 or n < block:
+        return np.zeros(0)
+    starts = range(0, n - block + 1, hop)
+    return np.array([
+        float(np.sum(np.mean(filtered[:, s:s + block] ** 2, axis=1)))
+        for s in starts
+    ])
 
-    if len(gated2) < 2:
-        return float("nan")
 
-    lo = np.percentile(gated2, 10)
-    hi = np.percentile(gated2, 95)
-    return float(hi - lo)
+def _energy_to_lufs(z) -> float:
+    return -0.691 + 10 * math.log10(z)
+
+
+def _gated_integrated_lufs(z: NDArray) -> Optional[float]:
+    """BS.1770-4 two-stage gating over momentary block energies."""
+    z = z[z > 0]
+    if z.size == 0:
+        return None
+    loud = np.array([_energy_to_lufs(v) for v in z])
+    z_abs = z[loud >= _ABSOLUTE_GATE_LUFS]
+    if z_abs.size == 0:
+        return None
+    relative_gate = _energy_to_lufs(float(np.mean(z_abs))) - 10.0
+    z_rel = z_abs[np.array([_energy_to_lufs(v) for v in z_abs]) >= relative_gate]
+    if z_rel.size == 0:
+        return None
+    # Average in the energy domain; -0.691 is applied exactly once.
+    return _energy_to_lufs(float(np.mean(z_rel)))
+
+
+def _gated_loudness_range(z: NDArray) -> Optional[float]:
+    """EBU Tech 3342 LRA from short-term (3 s) block energies."""
+    z = z[z > 0]
+    if z.size < 2:
+        return None
+    loud = np.array([_energy_to_lufs(v) for v in z])
+    abs_gated = loud[loud >= _ABSOLUTE_GATE_LUFS]
+    if abs_gated.size < 2:
+        return None
+    relative_gate = _energy_to_lufs(float(np.mean(z[loud >= _ABSOLUTE_GATE_LUFS]))) - 20.0
+    rel_gated = abs_gated[abs_gated >= relative_gate]
+    if rel_gated.size < 2:
+        return None
+    return float(np.percentile(rel_gated, 95) - np.percentile(rel_gated, 10))
+
+
+def _integrated_loudness_lufs(audio: NDArray, sr: int) -> Optional[float]:
+    """Integrated loudness in LUFS per BS.1770-4, or None when undefined."""
+    filtered = _k_weighted_channels(audio, sr)
+    return _gated_integrated_lufs(_block_energies(filtered, sr, _MOMENTARY_BLOCK_S))
+
+
+def _loudness_range(audio: NDArray, sr: int) -> Optional[float]:
+    """EBU R128 Loudness Range (LRA) in LU, or None when undefined."""
+    filtered = _k_weighted_channels(audio, sr)
+    return _gated_loudness_range(_block_energies(filtered, sr, _SHORT_TERM_BLOCK_S))
 
 
 def compute_loudness(audio: NDArray, sr: int, ref_audio=None, ref_sr=None) -> list[MetricResult]:
-    mono = _to_mono(audio)
+    channels = _as_channels(audio)
+    duration = channels.shape[-1] / sr if sr else 0.0
 
-    lufs = _safe(_integrated_loudness_lufs, audio, sr, name="LUFS")
-    lra = _safe(_loudness_range, audio, sr, name="LRA")
-
-    # Short-term loudness (3s window max)
-    max_short_term = None
+    lufs = lra = max_short_term = None
+    lufs_note = lra_note = short_term_note = None
     try:
-        filtered = _k_weighting_filter(mono, sr)
-        block = int(3 * sr)
-        if len(filtered) >= block:
-            vals = []
-            for i in range(0, len(filtered) - block + 1, int(0.1 * sr)):
-                sq = float(np.mean(filtered[i:i + block] ** 2))
-                if sq > 0:
-                    vals.append(-0.691 + 10 * math.log10(sq))
-            max_short_term = max(vals) if vals else None
+        filtered = _k_weighted_channels(audio, sr)
+        z_momentary = _block_energies(filtered, sr, _MOMENTARY_BLOCK_S)
+        z_short = _block_energies(filtered, sr, _SHORT_TERM_BLOCK_S)
+        lufs = _gated_integrated_lufs(z_momentary)
+        lra = _gated_loudness_range(z_short)
+        positive_short = z_short[z_short > 0]
+        if positive_short.size:
+            max_short_term = _energy_to_lufs(float(np.max(positive_short)))
+
+        # Explain every unavailable value the same way (value None + warning).
+        if lufs is None:
+            lufs_note = (
+                f"Unavailable: requires at least {_MOMENTARY_BLOCK_S:g} s of audio (got {duration:.2f} s)"
+                if z_momentary.size == 0
+                else f"Unavailable: signal never exceeds the {_ABSOLUTE_GATE_LUFS:g} LUFS absolute gate"
+            )
+        if max_short_term is None:
+            short_term_note = (
+                f"Unavailable: requires at least {_SHORT_TERM_BLOCK_S:g} s of audio (got {duration:.2f} s)"
+                if z_short.size == 0
+                else "Unavailable: signal is digitally silent"
+            )
+        if lra is None:
+            if z_short.size == 0:
+                lra_note = f"Unavailable: requires at least {_SHORT_TERM_BLOCK_S:g} s of audio (got {duration:.2f} s)"
+            elif z_short.size < 2:
+                lra_note = (
+                    f"Unavailable: requires at least two {_SHORT_TERM_BLOCK_S:g} s short-term windows "
+                    f"(got {duration:.2f} s)"
+                )
+            else:
+                lra_note = f"Unavailable: too few short-term windows above the {_ABSOLUTE_GATE_LUFS:g} LUFS gate"
     except Exception as e:
-        warnings.warn(f"Metric 'Max Short-Term Loudness' failed: {e}")
+        _warn_metric_failure("Loudness", e)
+        lufs_note = lra_note = short_term_note = f"Unavailable: loudness computation failed ({e})"
 
-    # True peak (oversample 4x via upsampling) — GPU-accelerated
+    # True peak (4x band-limited oversampling), maximum over channels (BS.1770-4 Annex 2)
     try:
-        true_peak_dbtp = _gpu.true_peak(mono, sr, oversample=4)
+        true_peak_dbtp = max(_gpu.true_peak(ch, sr, oversample=4) for ch in channels)
     except Exception as e:
         _warn_metric_failure("True Peak", e)
-        true_peak_dbtp = _db(float(np.max(np.abs(mono))))
+        true_peak_dbtp = _db(float(np.max(np.abs(channels)))) if channels.size else None
+
+    if lufs is not None:
+        lufs_warning = ("Too loud for streaming" if lufs > -14 else
+                        "Too quiet for streaming" if lufs < -18 else None)
+    else:
+        lufs_warning = lufs_note
 
     results = [
         MetricResult("Integrated Loudness (LUFS)", lufs, "LUFS",
                      "ITU-R BS.1770 / EBU R128 integrated loudness (gated)", "loudness",
                      reference_range=(-16.0, -14.0),
-                     warning=("Too loud for streaming" if lufs and lufs > -14 else
-                              "Too quiet for streaming" if lufs and lufs < -18 else None)),
+                     warning=lufs_warning),
         MetricResult("Loudness Range (LRA)", lra, "LU",
                      "EBU R128 loudness range: dynamic variation of the program", "loudness",
-                     reference_range=(5.0, 15.0)),
+                     reference_range=(5.0, 15.0),
+                     warning=lra_note),
         MetricResult("Max Short-Term Loudness", max_short_term, "LUFS",
-                     "Maximum 3-second sliding window loudness", "loudness"),
+                     "Maximum 3-second sliding window loudness", "loudness",
+                     warning=short_term_note),
         MetricResult("True Peak", true_peak_dbtp, "dBTP",
                      "Inter-sample peak level (4x oversampled). Streaming limit: -1 dBTP", "loudness",
                      higher_is_better=False,
-                     warning="Exceeds -1 dBTP streaming limit" if true_peak_dbtp and true_peak_dbtp > -1 else None),
+                     warning=("Exceeds -1 dBTP streaming limit"
+                              if true_peak_dbtp is not None and true_peak_dbtp > -1 else None)),
     ]
 
     # ── Streaming loudness target advisor ────────────────────────────────────
@@ -400,46 +434,28 @@ def compute_spectral(audio: NDArray, sr: int, ref_audio=None, ref_sr=None) -> li
     mono = _to_mono(audio)
     n_fft = 2048
 
-    # ── GPU single-pass spectral feature extraction ──────────────────────────
-    try:
-        _sf = _gpu.spectral_features(mono, sr, n_fft=n_fft)
-        centroid   = _sf["centroid"]
-        bandwidth  = _sf["bandwidth"]
-        rolloff    = _sf["rolloff"]
-        flatness_db = _sf["flatness_db"]
-        flux       = _sf["flux"]
-        entropy    = _sf["entropy"]
-        hfc_gpu    = _sf["hfc"]
-        gpu_ok = True
-    except Exception as e:
-        gpu_ok = False
-
     # Still need STFT for band energies + skewness + effective bandwidth
     try:
         f, t, mag = _stft(mono, sr, n_fft)
     except Exception as e:
         return [MetricResult("Spectral analysis", None, "", f"Failed: {e}", "spectral")]
 
+    # ── Single-pass spectral descriptors (shared with the gpu module) ────────
+    try:
+        _sf = _gpu.spectral_features(mono, sr, n_fft=n_fft)
+    except Exception as e:
+        warnings.warn(f"Metric 'Spectral features' fell back to the STFT magnitude path: {e}")
+        _sf = _gpu._spectral_features_from_mag(f, mag)
+    centroid = _sf["centroid"]
+    bandwidth = _sf["bandwidth"]
+    rolloff = _sf["rolloff"]
+    flatness_db = _sf["flatness_db"]
+    flux = _sf["flux"]
+    hfc_gpu = _sf["hfc"]
+
     power = mag ** 2
     total_power = power.sum(axis=0) + _eps()
     freqs = f
-
-    if not gpu_ok:
-        centroid = float(np.mean(np.sum(freqs[:, None] * power, axis=0) / total_power))
-        diff = (freqs[:, None] - centroid) ** 2
-        bandwidth = float(np.mean(np.sqrt(np.sum(diff * power, axis=0) / total_power)))
-        cumsum = np.cumsum(power, axis=0)
-        rolloff_idx = np.argmax(cumsum >= 0.95 * total_power[None, :], axis=0)
-        rolloff = float(np.mean(freqs[np.clip(rolloff_idx, 0, len(freqs) - 1)]))
-        geo_mean = np.exp(np.mean(np.log(power + _eps()), axis=0))
-        arith_mean = np.mean(power, axis=0) + _eps()
-        flatness = float(np.mean(geo_mean / arith_mean))
-        flatness_db = _power_db(flatness)
-        diff_mag = np.diff(mag, axis=1)
-        flux = float(np.mean(np.sqrt(np.sum(diff_mag ** 2, axis=0))))
-        norm_p = power / (total_power[None, :] + _eps())
-        entropy = float(np.mean(-np.sum(norm_p * np.log2(norm_p + _eps()), axis=0)))
-        hfc_gpu = float(np.mean(np.sum(freqs[:, None] * power, axis=0)))
 
     # Spectral skewness (always computed from STFT; requires centroid)
     norm_power = power / (total_power[None, :] + _eps())
@@ -604,6 +620,28 @@ def compute_temporal(audio: NDArray, sr: int, ref_audio=None, ref_sr=None) -> li
 # GROUP: noise
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Energy-ratio SNRs are capped here. Reached when the quietest frames are
+# digital silence (or 100+ dB down), i.e. the measurement is floor-limited.
+_SNR_CEILING_DB = 100.0
+_SNR_FLOOR_LIMITED_NOTE = (
+    "Floor-limited: the noise floor is digital silence (or >= 100 dB down), "
+    "so the SNR is reported at the 100 dB ceiling; the true value is at least this."
+)
+
+
+def _floor_limited_snr_db(signal_power: float, noise_power: float) -> float:
+    """Power-ratio SNR in dB, capped at the ceiling.
+
+    A digital-silence noise floor is the best case, so it maps to the ceiling;
+    only a silent *signal* yields 0 dB.
+    """
+    if signal_power <= 0:
+        return 0.0
+    if noise_power <= 0:
+        return _SNR_CEILING_DB
+    return min(10 * math.log10(signal_power / noise_power), _SNR_CEILING_DB)
+
+
 def compute_noise(audio: NDArray, sr: int, ref_audio=None, ref_sr=None) -> list[MetricResult]:
     mono = _to_mono(audio)
 
@@ -611,27 +649,34 @@ def compute_noise(audio: NDArray, sr: int, ref_audio=None, ref_sr=None) -> list[
     energies = _gpu.batch_energy(mono, sr, frame_len_ms=25.0, hop_ms=10.0)
     if len(energies) == 0:
         return []
-    frame_len = int(0.025 * sr)
-    hop = int(0.010 * sr)
 
     # Noise floor estimation: median of lowest 10th percentile frames
     noise_threshold = np.percentile(energies, 10)
     noise_frames_e = energies[energies <= noise_threshold]
     noise_floor_e = float(np.mean(noise_frames_e)) if len(noise_frames_e) > 0 else 0.0
-    noise_floor_db = _power_db(noise_floor_e) if noise_floor_e > 0 else float("nan")
+    # A digitally silent floor has no finite level: report None, never NaN.
+    noise_floor_db = _power_db(noise_floor_e) if noise_floor_e > 0 else None
 
     # Signal floor: energy of speech-active frames (top 50%)
     sig_threshold = np.percentile(energies, 50)
     sig_frames_e = energies[energies >= sig_threshold]
     signal_e = float(np.mean(sig_frames_e)) if len(sig_frames_e) > 0 else 0.0
 
-    # SNR estimate
-    snr = float("nan")
-    if noise_floor_e > 0 and signal_e > 0:
-        snr = 10 * math.log10(signal_e / noise_floor_e)
+    # SNR estimate. A digital-silence floor is the best case, not "unknown":
+    # report the SNR ceiling and flag the value as floor-limited.
+    snr = None
+    snr_note = None
+    floor_note = None
+    if signal_e > 0:
+        snr = _floor_limited_snr_db(signal_e, noise_floor_e)
+        if snr >= _SNR_CEILING_DB:
+            snr_note = _SNR_FLOOR_LIMITED_NOTE
+    if noise_floor_e <= 0:
+        floor_note = "No measurable noise floor: the quietest frames are digital silence."
 
     # Spectral noise estimation (via STFT on low-energy frames)
-    spectral_snr = float("nan")
+    spectral_snr = None
+    spectral_note = None
     try:
         from scipy.signal import stft as scipy_stft
         f, t_ax, Zxx = scipy_stft(mono, fs=sr, nperseg=512, noverlap=384)
@@ -641,9 +686,12 @@ def compute_noise(audio: NDArray, sr: int, ref_audio=None, ref_sr=None) -> list[
         if noise_mask.any() and (~noise_mask).any():
             noise_spec = mag[:, noise_mask].mean(axis=1)
             sig_spec = mag[:, ~noise_mask].mean(axis=1)
-            spectral_snr = float(10 * np.log10(
-                (np.mean(sig_spec ** 2) + _eps()) / (np.mean(noise_spec ** 2) + _eps())
-            ))
+            sig_p = float(np.mean(sig_spec ** 2))
+            noise_p = float(np.mean(noise_spec ** 2))
+            if sig_p > 0:
+                spectral_snr = _floor_limited_snr_db(sig_p, noise_p)
+                if spectral_snr >= _SNR_CEILING_DB:
+                    spectral_note = _SNR_FLOOR_LIMITED_NOTE
     except Exception as e:
         warnings.warn(f"Metric 'Spectral SNR' failed: {e}")
 
@@ -655,20 +703,23 @@ def compute_noise(audio: NDArray, sr: int, ref_audio=None, ref_sr=None) -> list[
     clipped_count = int(np.sum(np.abs(mono) >= 0.999 * peak_val)) if peak_val > 0.5 else 0
 
     # Dropout detection (sudden near-zero segments in otherwise active audio)
-    dropouts = _detect_dropouts(energies, hop, sr)
+    dropouts = _detect_dropouts(mono, sr)
 
     return [
         MetricResult("Estimated Noise Floor", noise_floor_db, "dBFS",
                      "Energy of quietest 10% of frames (noise floor estimate)", "noise",
-                     higher_is_better=False),
+                     higher_is_better=False,
+                     calibration_note=floor_note),
         MetricResult("Estimated SNR", snr, "dB",
                      "Signal-to-noise ratio: active speech vs noise floor (energy-based)", "noise",
                      higher_is_better=True,
                      reference_range=(20.0, 40.0),
-                     warning="Poor SNR for intelligible speech" if snr < 15 else None),
+                     warning="Poor SNR for intelligible speech" if snr is not None and snr < 15 else None,
+                     calibration_note=snr_note),
         MetricResult("Spectral SNR", spectral_snr, "dB",
                      "SNR estimated from spectral power of active vs quiet frames", "noise",
-                     higher_is_better=True),
+                     higher_is_better=True,
+                     calibration_note=spectral_note),
         MetricResult("Harmonic-to-Noise Ratio (HNR)", hnr, "dB",
                      "Ratio of harmonic (periodic) energy to noise. High = cleaner voiced speech.", "noise",
                      higher_is_better=True,
@@ -685,46 +736,111 @@ def compute_noise(audio: NDArray, sr: int, ref_audio=None, ref_sr=None) -> list[
     ]
 
 
+def _normalized_acf(frame: NDArray) -> NDArray:
+    """Autocorrelation of a Hann-windowed frame corrected for the window (Boersma 1993).
+
+    Dividing by the window's own autocorrelation removes the lag taper of the
+    biased estimate, so a perfectly periodic frame has r(T0) ~= 1 at any pitch.
+    Returns lags 0..len(frame)//2 (beyond that the window correction is unstable).
+    """
+    n = len(frame)
+    win = np.hanning(n)
+    xw = (frame - np.mean(frame)) * win
+    n_fft = 2 * n
+    fx = np.fft.rfft(xw, n=n_fft)
+    acf = np.fft.irfft(fx * np.conj(fx), n=n_fft)[: n // 2 + 1]
+    fw = np.fft.rfft(win, n=n_fft)
+    acf_w = np.fft.irfft(fw * np.conj(fw), n=n_fft)[: n // 2 + 1]
+    if acf[0] <= 0 or acf_w[0] <= 0:
+        return np.zeros(n // 2 + 1)
+    return (acf / acf[0]) / np.maximum(acf_w / acf_w[0], 1e-12)
+
+
 def _compute_hnr(mono: NDArray, sr: int, fmin=75, fmax=500) -> Optional[float]:
-    """Estimate HNR via autocorrelation method (mean over voiced frames)."""
+    """Estimate HNR via the window-corrected autocorrelation method (Boersma 1993).
+
+    HNR = 10*log10(r / (1 - r)) with r the normalized autocorrelation peak in the
+    pitch range; the median over analysed frames is reported.
+    """
     try:
-        frame_len = int(0.04 * sr)
+        # Three periods of the lowest pitch per frame (40 ms at 75 Hz).
+        frame_len = max(int(0.04 * sr), int(math.ceil(3.0 * sr / fmin)))
         hop = int(0.01 * sr)
-        min_lag = int(sr / fmax)
+        min_lag = max(1, int(sr / fmax))
         max_lag = int(sr / fmin)
         hnrs = []
         for start in range(0, len(mono) - frame_len, hop):
             frame = mono[start:start + frame_len]
-            frame = frame - frame.mean()
-            if np.max(np.abs(frame)) < 0.005:
+            if np.max(np.abs(frame - frame.mean())) < 0.005:
                 continue
-            n = 2 * frame_len
-            fft = np.fft.rfft(frame, n=n)
-            acf = np.fft.irfft(fft * np.conj(fft))[:frame_len]
-            acf /= (acf[0] + _eps())
-            if max_lag >= len(acf):
+            acf = _normalized_acf(frame)
+            if max_lag + 1 >= len(acf):
                 continue
-            r_max = np.max(acf[min_lag:max_lag])
-            if r_max >= 1.0:
-                continue
+            k = min_lag + int(np.argmax(acf[min_lag:max_lag + 1]))
+            r_max = float(acf[k])
+            # The period is rarely an integer number of samples: refine the peak
+            # height with a parabola through the three samples around it.
+            y0, y1, y2 = float(acf[k - 1]), r_max, float(acf[k + 1])
+            curvature = y0 - 2.0 * y1 + y2
+            if curvature < 0:
+                r_max = y1 - (y0 - y2) ** 2 / (8.0 * curvature)
+            # Numerical ceiling: a perfectly periodic frame is capped at ~60 dB.
+            r_max = min(r_max, 1.0 - 1e-6)
             if r_max > 0.0:
-                hnrs.append(10 * math.log10(r_max / (1.0 - r_max + _eps())))
+                hnrs.append(10 * math.log10(r_max / (1.0 - r_max)))
         return float(np.median(hnrs)) if hnrs else None
     except Exception as e:
-        _warn_metric_failure("Voiced/Unvoiced Ratio", e)
+        _warn_metric_failure("Harmonic-to-Noise Ratio (HNR)", e)
         return None
 
 
-def _detect_dropouts(energies: NDArray, hop: int, sr: int) -> int:
-    """Count frames that drop >30 dB below surrounding context."""
+_DROPOUT_BLOCK_S = 0.001        # envelope resolution
+_DROPOUT_SILENCE_DB = -60.0     # "near silence": this far below the active level
+_DROPOUT_ACTIVE_DB = -30.0      # level right before the gap must be within this of active
+_DROPOUT_MIN_GAP_S = 0.003      # ignore sub-3 ms dips
+_DROPOUT_PRE_S = 0.003          # abruptness window before the gap
+
+
+def _detect_dropouts(mono: NDArray, sr: int) -> int:
+    """Count abrupt mid-signal drops to digital silence or near-silence.
+
+    A dropout is a run of >= 3 ms whose 1 ms RMS envelope sits at least 60 dB
+    below the active level (95th percentile of the envelope) - which includes
+    exact digital zeros - AND that is entered abruptly: within the 3 ms before
+    the run the level is still within 30 dB of the active level. Runs touching
+    the start or end of the file are leading/trailing silence, not dropouts.
+    Natural pauses decay gradually to a noise floor and are not counted.
+    Each gap counts once, however long it is.
+    """
+    block = max(1, int(round(_DROPOUT_BLOCK_S * sr)))
+    n_blocks = len(mono) // block
+    if n_blocks < 3:
+        return 0
+    x = np.asarray(mono[: n_blocks * block], dtype=np.float64).reshape(n_blocks, block)
+    env = np.sqrt(np.mean(x ** 2, axis=1))
+    active_level = float(np.percentile(env, 95))
+    if active_level <= 0:
+        return 0
+    silent = env <= active_level * 10 ** (_DROPOUT_SILENCE_DB / 20)
+    min_gap = max(1, int(round(_DROPOUT_MIN_GAP_S / _DROPOUT_BLOCK_S)))
+    pre = max(1, int(round(_DROPOUT_PRE_S / _DROPOUT_BLOCK_S)))
+    active_floor = active_level * 10 ** (_DROPOUT_ACTIVE_DB / 20)
+
     count = 0
-    win = 10  # frames context
-    for i in range(win, len(energies) - win):
-        context = np.concatenate([energies[i - win:i], energies[i + 1:i + win + 1]])
-        if context.mean() > 0 and energies[i] > 0:
-            drop = 10 * math.log10(context.mean() / (energies[i] + _eps()))
-            if drop > 30:
+    i = 0
+    while i < n_blocks:
+        if not silent[i]:
+            i += 1
+            continue
+        j = i
+        while j < n_blocks and silent[j]:
+            j += 1
+        # run of silent blocks is [i, j)
+        mid_signal = i > 0 and j < n_blocks
+        if mid_signal and (j - i) >= min_gap:
+            if float(np.max(env[max(0, i - pre):i])) >= active_floor:
                 count += 1
+        i = j
     return count
 
 
@@ -853,7 +969,7 @@ def _compute_mfccs(mono: NDArray, sr: int, n_mfcc=13, n_mels=40, n_fft=512) -> O
         mfccs = dct(log_mel, type=2, axis=0, norm="ortho")[:n_mfcc]
         return mfccs
     except Exception as e:
-        _warn_metric_failure("Estimated Speaking Rate", e)
+        _warn_metric_failure("MFCC (cepstral distance)", e)
         return None
 
 
@@ -910,33 +1026,35 @@ def _voiced_unvoiced_ratio(mono: NDArray, sr: int) -> Optional[float]:
                     voiced += 1
         return voiced / total if total > 0 else None
     except Exception as e:
-        _warn_metric_failure("Speech-Band SNR", e)
+        _warn_metric_failure("Voiced/Unvoiced Ratio", e)
         return None
 
 
 def _estimate_speaking_rate(mono: NDArray, sr: int) -> Optional[float]:
     """Syllable nucleus detection via smooth energy envelope peaks."""
     try:
-        from scipy.signal import medfilt
+        from scipy.signal import find_peaks, medfilt
         frame_len = int(0.025 * sr)
         hop = int(0.005 * sr)
         energies = np.array([
             float(np.mean(mono[i:i + frame_len] ** 2))
             for i in range(0, len(mono) - frame_len, hop)
         ])
+        if len(energies) < 3:
+            return None
         smooth = medfilt(energies, kernel_size=min(21, len(energies) | 1))
-        # Find peaks in energy
+        # Median filtering flattens every maximum into a plateau, so a strict
+        # "greater than both neighbours" test finds no peaks at all; find_peaks
+        # reports one peak per plateau.
         threshold = np.percentile(smooth, 60)
-        peaks = []
-        for i in range(1, len(smooth) - 1):
-            if smooth[i] > smooth[i - 1] and smooth[i] > smooth[i + 1] and smooth[i] > threshold:
-                peaks.append(i)
+        peaks, _ = find_peaks(smooth)
+        peaks = [p for p in peaks if smooth[p] > threshold]
         duration = len(mono) / sr
         if duration > 0.5 and len(peaks) > 1:
             return len(peaks) / duration
         return None
     except Exception as e:
-        _warn_metric_failure("SI-SDR", e)
+        _warn_metric_failure("Estimated Speaking Rate", e)
         return None
 
 
@@ -956,7 +1074,7 @@ def _speech_band_snr(mono: NDArray, sr: int, flo=300, fhi=3400) -> Optional[floa
             return None
         return float(10 * math.log10(sp / np_))
     except Exception as e:
-        _warn_metric_failure("SDR (Signal-to-Distortion Ratio)", e)
+        _warn_metric_failure("Speech-Band SNR", e)
         return None
 
 
@@ -1057,7 +1175,7 @@ def _compute_dnsmos_p835(mono: NDArray, sr: int) -> list[MetricResult]:
         frame_p    = power.mean(axis=0)
         noise_floor = np.percentile(frame_p, 10)
         sig_p      = np.percentile(frame_p, 90)
-        snr_db     = 10 * math.log10(sig_p / (noise_floor + _eps())) if noise_floor > 0 else 0.0
+        snr_db     = _floor_limited_snr_db(sig_p, noise_floor)
 
         # Spectral tilt consistency: speech-like tilt ≈ −6 dB/oct
         mean_p = power.mean(axis=1) + _eps()
@@ -1316,7 +1434,7 @@ def _compute_pseudo_mos(mono: NDArray, sr: int) -> MetricResult:
         frame_p = power.mean(axis=0)
         noise_p = np.percentile(frame_p, 15)
         sig_p = np.percentile(frame_p, 85)
-        snr = (10 * math.log10(sig_p / (noise_p + _eps()))) if noise_p > 0 else 0.0
+        snr = _floor_limited_snr_db(sig_p, noise_p)
 
         # Spectral flatness (lower = more speech-like)
         geo = np.exp(np.mean(np.log(power.mean(axis=1) + _eps())))
@@ -1659,7 +1777,7 @@ def _compute_si_sdr(y: NDArray, r: NDArray) -> Optional[float]:
         )
         return float(si_sdr)
     except Exception as e:
-        _warn_metric_failure("Log-Spectral Distance", e)
+        _warn_metric_failure("SI-SDR", e)
         return None
 
 
@@ -1671,7 +1789,7 @@ def _compute_sdr(y: NDArray, r: NDArray) -> Optional[float]:
         )
         return float(sdr)
     except Exception as e:
-        _warn_metric_failure("Spectral Correlation", e)
+        _warn_metric_failure("SDR (Signal-to-Distortion Ratio)", e)
         return None
 
 
@@ -1687,7 +1805,7 @@ def _log_spectral_distance(y: NDArray, r: NDArray, sr: int) -> Optional[float]:
         lsd = float(np.mean(np.sqrt(np.mean((10 * np.log10(py / pr)) ** 2, axis=0))))
         return lsd
     except Exception as e:
-        _warn_metric_failure("Cepstral Distance", e)
+        _warn_metric_failure("Log-Spectral Distance", e)
         return None
 
 
