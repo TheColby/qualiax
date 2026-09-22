@@ -635,9 +635,17 @@ A few behaviors worth knowing:
   raises instead of silently starting over when the file is corrupt.
 - `benchmark_budget(...)` counts a baseline metric that is missing from the current run as a failure.
 - `AnalysisCache` is a standalone helper: `analyze()` and the CLI don't consult it yet.
-- `ExitCode` provides stable values for automation, but the CLI doesn't use all of them consistently
-  yet: analysis failures exit `1`, and command-line usage errors exit `2`, the same code as a failed
-  quality gate. Both are planned for v1.2.0.
+- `ExitCode` provides stable values for automation, and the CLI uses them consistently:
+
+  | Code | Name | When |
+  |---|---|---|
+  | `0` | `OK` | Everything succeeded and every gate passed |
+  | `1` | `INVALID_INPUT` | Command-line usage errors, missing or undecodable audio, invalid rule configs |
+  | `2` | `QUALITY_GATE_FAILED` | Threshold-rule violations or a failed `--ci` gate |
+  | `3` | `ANALYSIS_FAILED` | Analysis crashed after the audio loaded, including `--strict` metric-group failures |
+  | `4` | `CONTRACT_VIOLATION` | `--validate-output` or `qualiax insights validate` found schema violations |
+
+  When a run has several outcomes, the most severe wins: `3`, then `1`, then `2`.
 
 ---
 

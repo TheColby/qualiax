@@ -74,7 +74,59 @@ def collect_files(path: Path) -> list[Path]:
         raise click.ClickException(str(exc)) from exc
 
 
-@click.command()
+class _ContractViolation(click.ClickException):
+    exit_code = ExitCode.CONTRACT_VIOLATION
+
+
+class _AnalysisFailed(click.ClickException):
+    exit_code = ExitCode.ANALYSIS_FAILED
+
+
+class _QualiaxCommand(click.Command):
+    """Report command-line usage errors as INVALID_INPUT instead of Click's default 2,
+    which would be indistinguishable from QUALITY_GATE_FAILED."""
+
+    def parse_args(self, ctx, args):
+        try:
+            return super().parse_args(ctx, args)
+        except click.UsageError as exc:
+            exc.exit_code = ExitCode.INVALID_INPUT
+            raise
+
+    def invoke(self, ctx):
+        try:
+            return super().invoke(ctx)
+        except click.UsageError as exc:
+            exc.exit_code = ExitCode.INVALID_INPUT
+            raise
+
+
+_INPUT_ERROR_CODES = frozenset({"audio_load_failed", "reference_load_failed"})
+
+
+def _errors_exit_code(results) -> ExitCode | None:
+    errored = [result for result in results if result.error]
+    if not errored:
+        return None
+    if all(any(d.code in _INPUT_ERROR_CODES for d in result.diagnostics) for result in errored):
+        return ExitCode.INVALID_INPUT
+    return ExitCode.ANALYSIS_FAILED
+
+
+# Most severe first; a run reports the most severe outcome of any batch.
+_EXIT_SEVERITY = (
+    ExitCode.ANALYSIS_FAILED,
+    ExitCode.INVALID_INPUT,
+    ExitCode.QUALITY_GATE_FAILED,
+    ExitCode.OK,
+)
+
+
+def _most_severe(*codes: ExitCode) -> ExitCode:
+    return min(codes, key=_EXIT_SEVERITY.index)
+
+
+@click.command(cls=_QualiaxCommand)
 @click.argument("paths", nargs=-1, required=False, type=click.Path())
 @click.option("--silent", is_flag=True, help="Suppress console output (useful with --output).")
 @click.option("--save-sidecar", is_flag=True,
@@ -398,7 +450,7 @@ def main(
             for issue in issues:
                 label = "error" if issue.level == "error" else "warn"
                 click.echo(f"[{label}] {issue.message}", err=True)
-            sys.exit(ExitCode.QUALITY_GATE_FAILED if any(issue.level == "error" for issue in issues) else ExitCode.OK)
+            sys.exit(ExitCode.INVALID_INPUT if any(issue.level == "error" for issue in issues) else ExitCode.OK)
         error_lints = [issue for issue in preset_lints + user_rule_lints if issue.level == "error"]
         if error_lints:
             raise click.ClickException(error_lints[0].message)
@@ -456,7 +508,7 @@ def main(
         def _validate_written_path(path: Path) -> None:
             issues = validate_report_file(path)
             if issues:
-                raise click.ClickException(
+                raise _ContractViolation(
                     "Output validation failed: "
                     + "; ".join(f"{issue.path}: {issue.message}" for issue in issues[:6])
                 )
@@ -527,18 +579,19 @@ def main(
             reporter = _make_reporter(console_fmt, color=not no_color)
             click.echo(reporter.render(batch_results))
 
-        def _batch_exit_code(batch_results, violations) -> int:
-            if any(result.error for result in batch_results):
-                return 1
+        def _batch_exit_code(batch_results, violations) -> ExitCode:
+            error_code = _errors_exit_code(batch_results)
+            if error_code is not None:
+                return error_code
             if violations:
-                return 2
+                return ExitCode.QUALITY_GATE_FAILED
             if any(
                 check.get("status") == "fail"
                 for result in batch_results
                 for check in result.insights.get("ci_checks", [])
             ):
-                return 2
-            return 0
+                return ExitCode.QUALITY_GATE_FAILED
+            return ExitCode.OK
 
         if watch:
             if output and Path(output).exists() and not force:
@@ -559,7 +612,7 @@ def main(
             snippet_session: set[str] = set()
             aggregate_results = []
             processed = 0
-            exit_code = 0
+            exit_code = ExitCode.OK
             out_fmt = _detect_format(Path(output), fmt) if output else fmt
             if not silent:
                 click.echo(
@@ -624,11 +677,7 @@ def main(
                         _write_scorecard(aggregate_results, allow_overwrite=True)
                         _write_insights_summary(aggregate_results, allow_overwrite=True)
                         _render_console(batch_results)
-                        batch_exit = _batch_exit_code(batch_results, violations)
-                        if batch_exit == 1:
-                            exit_code = 1
-                        elif batch_exit == 2 and exit_code == 0:
-                            exit_code = 2
+                        exit_code = _most_severe(exit_code, _batch_exit_code(batch_results, violations))
                         processed += len(new_files)
                         if watch_limit is not None and processed >= watch_limit:
                             break
@@ -637,7 +686,12 @@ def main(
                     click.echo("Watch mode stopped.", err=True)
             sys.exit(exit_code)
 
-        results = _normalize_results(analyzer.analyze_all(all_files, on_progress=_on_progress))
+        try:
+            results = _normalize_results(analyzer.analyze_all(all_files, on_progress=_on_progress))
+        except Exception as exc:
+            if not strict:
+                raise
+            raise _AnalysisFailed(str(exc)) from exc
         preset_violations = apply_threshold_rules(results, preset_rule_defs)
         user_violations = apply_threshold_rules(
             results,

@@ -30,12 +30,12 @@ from .version import OUTPUT_SCHEMA_VERSION, __version__
 class ExitCode(IntEnum):
     """Process exit codes for automation.
 
-    What the CLI emits today: ``OK``; ``INVALID_INPUT`` when no supported audio
-    files are found; ``QUALITY_GATE_FAILED`` for rule violations, ``--lint-rules``
-    errors, and failed ``--ci`` gates; ``CONTRACT_VIOLATION`` from
-    ``qualiax insights validate``. Two caveats: a file that fails to analyze
-    currently exits ``1`` (not ``ANALYSIS_FAILED``), and click's own usage errors
-    exit ``2``, which overlaps ``QUALITY_GATE_FAILED``.
+    ``INVALID_INPUT``: usage errors, missing or undecodable audio, invalid rule configs.
+    ``QUALITY_GATE_FAILED``: threshold-rule violations and failed ``--ci`` gates.
+    ``ANALYSIS_FAILED``: analysis crashed after the audio loaded (including ``--strict``).
+    ``CONTRACT_VIOLATION``: ``--validate-output`` or ``qualiax insights validate`` failed.
+    A run with several outcomes reports the most severe: ANALYSIS_FAILED, then
+    INVALID_INPUT, then QUALITY_GATE_FAILED.
     """
 
     OK = 0

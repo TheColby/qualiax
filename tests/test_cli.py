@@ -5,6 +5,7 @@ from pathlib import Path
 from click.testing import CliRunner
 
 from qualiax.cli import _finalize_watch_batch, _iter_watch_batches_polling, collect_files, main
+from qualiax.migrations import ExitCode
 from qualiax.models import FileResult, MetricResult
 from qualiax.version import OUTPUT_SCHEMA_VERSION
 
@@ -391,7 +392,7 @@ def test_cli_lint_rules_can_fail_without_inputs():
         )
         result = runner.invoke(main, ["--rules", "rules.json", "--lint-rules"])
 
-        assert result.exit_code == 2
+        assert result.exit_code == ExitCode.INVALID_INPUT
         assert "unknown group" in result.output
 
 

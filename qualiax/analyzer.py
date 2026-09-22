@@ -639,7 +639,10 @@ class AudioAnalyzer:
 
     def _run_task(self, task: _AnalysisTask) -> FileResult:
         if task.sr == 0:
-            return FileResult(path=task.label, source_file=task.source_file, error=task.load_error or "failed to load audio")
+            message = task.load_error or "failed to load audio"
+            result = FileResult(path=task.label, source_file=task.source_file, error=message)
+            self._add_diagnostic(result, code="audio_load_failed", severity="error", source="loader", message=message)
+            return result
         return self._analyze_loaded_audio(
             task.audio,
             task.sr,
