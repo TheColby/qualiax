@@ -154,15 +154,6 @@ def test_provenance_null_is_allowed_but_wrong_type_is_not():
     assert "$[0].provenance" in _issue_paths(validate_report_payload(payload))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "validation.py never enforces minItems/maxItems: array schemas return from "
-        "_validate_required before the length checks, so a 3-element reference_range "
-        "passes. Fix deferred because qualiax/validation.py is being edited "
-        "concurrently for insights validation."
-    ),
-)
 def test_reference_range_must_have_exactly_two_items():
     payload = _valid_report()
     payload[0]["metrics"][0]["reference_range"] = [0.0, 1.0, 2.0]

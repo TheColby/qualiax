@@ -121,6 +121,7 @@ SUGGESTION_KEYWORDS = {
     "over_loud": "reduce program loudness",
     "low_perceptual_quality": "codec",
     "silence_heavy": "silence",
+    "dropouts": "conceal the gaps",
 }
 
 
@@ -132,7 +133,7 @@ SUGGESTION_KEYWORDS = {
         ("noisy", {"noisy_floor"}, {"hard_clipping", "under_loud", "over_loud", "silence_heavy"}),
         ("quiet", {"under_loud"}, {"noisy_floor", "clipping_risk", "hard_clipping", "low_perceptual_quality"}),
         ("silent", {"silence_heavy"}, {"low_perceptual_quality", "noisy_floor", "hard_clipping"}),
-        ("dropouts", set(), {"hard_clipping", "clipping_risk", "noisy_floor", "over_loud"}),
+        ("dropouts", {"dropouts"}, {"hard_clipping", "clipping_risk", "noisy_floor", "over_loud"}),
     ],
 )
 def test_defect_labels_match_injected_defect(reports, name, required, forbidden):
@@ -174,14 +175,11 @@ def test_mos_label_uses_dnsmos_rather_than_p563_floor(reports):
     assert noisy["evidence_metrics"][0]["metric"].startswith("DNSMOS P.835 OVRL")
 
 
-@pytest.mark.xfail(
-    reason="metrics.py _detect_dropouts ignores zero-energy frames, so zeroed gaps never register; "
-    "no dropout label can be derived from the current metrics",
-    strict=False,
-)
 def test_zeroed_gaps_get_a_dropout_label(reports):
     labels = _labels(reports["dropouts"]["report"][0])
-    assert any("dropout" in label_id for label_id in labels)
+    assert labels["dropouts"]["severity"] == "warn"
+    assert labels["dropouts"]["evidence_metrics"][0]["metric"] == "Detected Dropouts"
+    assert "dropouts" not in _labels(reports["clean"]["report"][0])
 
 
 @pytest.mark.parametrize(

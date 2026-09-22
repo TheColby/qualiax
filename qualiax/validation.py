@@ -100,6 +100,12 @@ def _validate_required(payload: Any, schema: dict[str, Any], *, path: str) -> li
     if schema_type == "array":
         if not isinstance(payload, list):
             return [ValidationIssue(path=path, message="Expected array.")]
+        min_items = schema.get("minItems")
+        max_items = schema.get("maxItems")
+        if min_items is not None and len(payload) < min_items:
+            issues.append(ValidationIssue(path=path, message=f"Array must contain at least {min_items} item(s)."))
+        if max_items is not None and len(payload) > max_items:
+            issues.append(ValidationIssue(path=path, message=f"Array must contain at most {max_items} item(s)."))
         item_schema = schema.get("items")
         if isinstance(item_schema, dict):
             for index, item in enumerate(payload):

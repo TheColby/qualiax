@@ -219,8 +219,16 @@ def _awkward_result(path="awkward.wav"):
         group_health=[GroupHealth(group="loudness", status="partial", metric_count=4, missing_count=2)],
         provenance=ProvenanceInfo(compute_backend="cpu (numpy)", runtime_fingerprint="f00"),
         insights={
-            "quality_fingerprint": {"signature": "abc", "score": float("nan")},
-            "defect_labels": [{"id": "noisy_floor", "evidence": "snr"}],
+            "quality_fingerprint": {
+                "version": 2,
+                "sensitivity": "balanced",
+                "signature": "abc",
+                "features": {"score": float("nan")},
+                "buckets": {},
+            },
+            "defect_labels": [
+                {"id": "noisy_floor", "severity": "warn", "confidence": 0.9, "evidence": "snr", "evidence_metrics": []}
+            ],
         },
         metrics=[
             MetricResult("Loudness Range (LRA)", float("nan"), "LU", "range", "loudness"),
@@ -258,7 +266,7 @@ def test_every_format_renders_without_nan(fmt):
         assert values["Peak Level"] is None       # -inf has no JSON literal
         assert values["Numpy Float"] == 1.5
         assert values["Numpy Int"] == 3
-        assert payload[0]["insights"]["quality_fingerprint"]["score"] is None
+        assert payload[0]["insights"]["quality_fingerprint"]["features"]["score"] is None
         assert validate_report_payload(payload) == []
     else:
         assert not NAN_TOKEN.search(rendered), fmt

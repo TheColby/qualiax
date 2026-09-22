@@ -95,6 +95,7 @@ _FINGERPRINT_FEATURES = {
 # flag rather than a ratio, so the ratio feature is derived from these.
 _NEAR_CLIPPED_METRIC = "Near-Clipped Samples"
 _CLIPPING_FLAG_METRIC = "Clipping Detected"
+_DROPOUT_METRIC = "Detected Dropouts"
 
 KNOWN_INSIGHT_FEATURES = frozenset(_FINGERPRINT_FEATURES.values())
 _VALID_LABEL_SEVERITIES = ("info", "warn", "fail")
@@ -712,6 +713,10 @@ def _defect_labels(
     # MOS models/proxies score silence as "bad speech"; silence_heavy covers that case.
     if mos is not None and mos < 2.8 and not is_silence:
         labels.append(_label("low_perceptual_quality", "warn", 0.82, f"MOS proxy/model score is {mos:.2f}", metric_lookup.get(mos_feature)))
+    dropout_metric = next((m for m in result.metrics if m.name == _DROPOUT_METRIC), None)
+    dropouts = dropout_metric.value if dropout_metric is not None else None
+    if isinstance(dropouts, (int, float)) and dropouts > 0:
+        labels.append(_label("dropouts", "warn", 0.85, f"{int(dropouts)} dropout(s) to digital silence detected", dropout_metric))
     if is_silence:
         labels.append(_label("silence_heavy", "warn", 0.88, "content detector or duration indicates little usable audio", None))
     return labels
@@ -765,6 +770,7 @@ def _repair_suggestions(labels: list[dict[str, Any]]) -> list[str]:
         "over_loud": "Reduce program loudness and check limiter settings.",
         "low_perceptual_quality": "Inspect codec, noise, and speech enhancement stages before accepting the file.",
         "silence_heavy": "Trim leading/trailing silence or verify the file is the intended recording.",
+        "dropouts": "Check the capture/transmission chain for buffer underruns or packet loss; re-record or conceal the gaps.",
     }
     suggestions = []
     for label in labels:
