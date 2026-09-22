@@ -20,10 +20,12 @@ from .analyzer import AudioAnalyzer
 from .discovery import SUPPORTED_EXTENSIONS, collect_files as _collect_files
 from .diffing import diff_reports, render_diff
 from .insights import (
+    InsightInputError,
     build_insight_summary_payload,
     enrich_existing_report,
     enrich_results,
     export_flagged_segment_snippets,
+    validate_insight_inputs,
     validate_insights_report,
 )
 from .metrics import available_metric_groups
@@ -290,6 +292,17 @@ def main(
         raise click.UsageError("--watch cannot be combined with --mic-seconds.")
     if not paths and mic_seconds is None and not lint_rules:
         raise click.UsageError("Provide at least one input path, use '-', or set --mic-seconds.")
+    _check_insight_options(
+        insights=insights,
+        baseline=baseline,
+        ci=ci,
+        drift=drift,
+        drift_state=drift_state,
+        fingerprint_sensitivity=fingerprint_sensitivity,
+        insight_rules=insight_rules,
+        insight_snippets=insight_snippets,
+        insights_summary=insights_summary,
+    )
 
     # --- Collect files ---
     all_files: list[Path] = []
@@ -543,6 +556,7 @@ def main(
                 if _file_signature(candidate.resolve()) is not None
             }
             retry_state: dict[str, dict[str, object]] = {}
+            snippet_session: set[str] = set()
             aggregate_results = []
             processed = 0
             exit_code = 0
@@ -601,7 +615,7 @@ def main(
                                 insight_rules_path=insight_rules,
                             )
                             if insight_snippets:
-                                export_flagged_segment_snippets(aggregate_results, insight_snippets)
+                                _export_snippets(aggregate_results, insight_snippets, force=force, session_paths=snippet_session)
                         _write_sidecars(batch_results, allow_overwrite=force)
                         if out_fmt == "jsonl":
                             _write_output(batch_results, allow_overwrite=True, append=True)
@@ -643,7 +657,7 @@ def main(
                 insight_rules_path=insight_rules,
             )
             if insight_snippets:
-                export_flagged_segment_snippets(results, insight_snippets)
+                _export_snippets(results, insight_snippets, force=force)
         _write_sidecars(results, allow_overwrite=force)
         _write_output(results, allow_overwrite=force)
         _write_scorecard(results, allow_overwrite=force)
@@ -751,19 +765,67 @@ def _run_insights_subcommand(
         raise click.ClickException(
             f"Refusing to overwrite existing output file without --force: {output_path}"
         )
-    enrich_existing_report(
-        input_path,
-        output_path,
-        baseline_path=baseline,
-        ci=ci,
-        drift=drift,
-        drift_state_path=drift_state,
-        fingerprint_sensitivity=fingerprint_sensitivity,
-        preset=preset,
-        insight_rules_path=insight_rules,
-    )
+    if drift_state and not drift:
+        raise click.UsageError("--drift-state requires --drift.")
+    try:
+        results = enrich_existing_report(
+            input_path,
+            output_path,
+            baseline_path=baseline,
+            ci=ci,
+            drift=drift,
+            drift_state_path=drift_state,
+            fingerprint_sensitivity=fingerprint_sensitivity,
+            preset=preset,
+            insight_rules_path=insight_rules,
+        )
+    except InsightInputError as exc:
+        raise click.ClickException(str(exc)) from exc
     if not silent:
         click.echo(f"Insights written to {output_path}", err=True)
+    if any(check.get("status") == "fail" for result in results for check in result.insights.get("ci_checks", [])):
+        sys.exit(ExitCode.QUALITY_GATE_FAILED)
+
+
+def _check_insight_options(
+    *,
+    insights: bool,
+    baseline: Optional[str],
+    ci: bool,
+    drift: bool,
+    drift_state: Optional[str],
+    fingerprint_sensitivity: str,
+    insight_rules: Optional[str],
+    insight_snippets: Optional[str],
+    insights_summary: Optional[str],
+) -> None:
+    """Reject insight options that would otherwise be silently ignored, before analysis starts."""
+    dependent = {
+        "--baseline": baseline,
+        "--ci": ci,
+        "--drift": drift,
+        "--drift-state": drift_state,
+        "--fingerprint-sensitivity": fingerprint_sensitivity.lower() != "balanced",
+        "--insight-rules": insight_rules,
+        "--insight-snippets": insight_snippets,
+        "--insights-summary": insights_summary,
+    }
+    used = [flag for flag, value in dependent.items() if value]
+    if used and not insights:
+        raise click.UsageError(f"{', '.join(used)} {'requires' if len(used) == 1 else 'require'} --insights.")
+    if drift_state and not drift:
+        raise click.UsageError("--drift-state requires --drift.")
+    try:
+        validate_insight_inputs(baseline_path=baseline, insight_rules_path=insight_rules)
+    except InsightInputError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+def _export_snippets(results, directory: str, *, force: bool, session_paths: Optional[set[str]] = None) -> None:
+    try:
+        export_flagged_segment_snippets(results, directory, overwrite=force, session_paths=session_paths)
+    except FileExistsError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 def _run_diff(

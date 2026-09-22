@@ -10,6 +10,8 @@ import math
 from html import escape
 from typing import Any
 
+import numpy as np
+
 from .models import FileResult, MetricResult
 from .version import OUTPUT_SCHEMA_VERSION, __version__
 
@@ -248,15 +250,29 @@ class JsonlReporter:
 
 
 def _sanitize_for_json(obj):
+    """Make ``obj`` strictly JSON-serialisable.
+
+    NaN/Infinity become null (JSON has no literal for them), and numpy scalars
+    and arrays - which ``json`` cannot encode, and which custom metric groups
+    easily return - become plain Python values.
+    """
     if isinstance(obj, dict):
         return {key: _sanitize_for_json(value) for key, value in obj.items()}
-    if isinstance(obj, list):
+    if isinstance(obj, (list, tuple)):
         return [_sanitize_for_json(value) for value in obj]
-    if isinstance(obj, tuple):
-        return [_sanitize_for_json(value) for value in obj]
+    if isinstance(obj, np.ndarray):
+        return [_sanitize_for_json(value) for value in obj.tolist()]
+    if isinstance(obj, np.generic):
+        return _sanitize_for_json(obj.item())
     if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
         return None
     return obj
+
+
+def _csv_value(value):
+    """CSV cell for a metric value: blank when missing or non-finite."""
+    value = _sanitize_for_json(value)
+    return "" if value is None else value
 
 
 def _metric_status(metric: MetricResult) -> str:
@@ -1058,13 +1074,7 @@ class CsvReporter:
             }
             metric_lookup = {m.name: m.value for m in r.metrics}
             for name in all_metric_names:
-                v = metric_lookup.get(name)
-                if v is None:
-                    row[name] = ""
-                elif isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
-                    row[name] = ""
-                else:
-                    row[name] = v
+                row[name] = _csv_value(metric_lookup.get(name))
             writer.writerow(row)
 
         return buf.getvalue()

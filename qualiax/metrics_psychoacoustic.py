@@ -189,8 +189,11 @@ def compute_sharpness(audio: NDArray, sr: int) -> list[MetricResult]:
 
     N_total = N_specific.sum() + 1e-14
 
-    # Von Bismarck (1974) sharpness weighting function g(z)
-    g = np.where(z_centers <= 15.0, 1.0, 0.066 * np.exp(0.171 * z_centers))
+    # Zwicker & Fastl sharpness weighting g(z): 1 up to 16 Bark, then
+    # 0.066*exp(0.171 z), which is continuous (~1.02) at the 16 Bark knee.
+    # (With the knee at 15 Bark the weight dropped to 0.86 and sharpness fell
+    # as frequency rose between ~2.7 and 3.2 kHz.)
+    g = np.where(z_centers <= 16.0, 1.0, 0.066 * np.exp(0.171 * z_centers))
 
     sharpness = 0.11 * float(np.sum(N_specific * g * z_centers) / N_total)
 
@@ -209,7 +212,7 @@ def compute_tonality(audio: NDArray, sr: int) -> list[MetricResult]:
     Tonal vs. noise-like character via spectral flatness measure (SFM).
 
     SFM = geometric mean / arithmetic mean of power spectrum.
-    0 = pure noise, 1 = pure sine.  Tonality = max(0, 1 – SFM).
+    0 = pure sine, 1 = flat (white) spectrum.  Tonality = max(0, 1 – SFM).
     """
     n_fft = 4096
     win   = np.hanning(n_fft)

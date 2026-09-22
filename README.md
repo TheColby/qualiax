@@ -124,18 +124,22 @@ To generate a small set of demo outputs end-to-end:
 
 ### Quick Install
 
-From the project root:
+From PyPI:
 
 ```bash
 # Minimal — WAV support only
-pip install -e .
+pip install qualiax
 
 # Recommended — adds MP3, FLAC, OGG, AAC support
-pip install -e ".[audio]"
+pip install "qualiax[audio]"
 
 # Full — stable extras for formats, reports, learned-MOS hooks, watch mode, and microphone capture
-pip install -e ".[all]"
+pip install "qualiax[all]"
 ```
+
+`pesq` (pulled in by the `perceptual` and `all` extras) has no prebuilt wheels, so those extras need a C compiler.
+
+From a source checkout, use an editable install instead, e.g. `pip install -e ".[audio,dev]"`.
 
 After installation, `qualiax` is available in the environment you installed it into.
 
@@ -145,7 +149,7 @@ After installation, `qualiax` is available in the environment you installed it i
 ./install.sh
 ```
 
-The install script is a thin wrapper around the extras defined in [pyproject.toml](/Users/cleider/dev/qualiax/pyproject.toml). It creates or reuses a local `.venv` by default, installs `qualiax` from the current checkout, and avoids automatic `sudo` or package-manager changes.
+The install script is a thin wrapper around the extras defined in [pyproject.toml](https://github.com/TheColby/qualiax/blob/main/pyproject.toml). It creates or reuses a local `.venv` by default, installs `qualiax` from the current checkout, and avoids automatic `sudo` or package-manager changes.
 
 Make it executable first if needed:
 
@@ -339,9 +343,9 @@ qualiax insights qa.json --output enriched.json --silent
 qualiax insights validate enriched.json
 ```
 
-`--insights` adds a versioned structured `insights` object to each result with a configurable quality fingerprint, human-readable defect labels with severity and metric evidence, repair suggestions, MOS explanations, triage rank, dataset-audit notes, and segment heatmaps when segment metadata is present. `--baseline` compares the current run against a prior JSON report using baseline mean and percentile bands plus baseline provenance, `--drift` compares each result against the previous result in the run or watch stream, and `--drift-state` persists that comparison across sessions. `--ci` adds quality-gate checks that return exit code `2` when they fail.
+`--insights` adds a versioned structured `insights` object to each result with a configurable quality fingerprint, human-readable defect labels with severity and metric evidence, repair suggestions, MOS explanations, triage rank, dataset-audit notes, and segment heatmaps when segment metadata is present. `--baseline` compares the current run against a prior JSON report using baseline mean and percentile bands plus baseline provenance, `--drift` compares each result against the previous result in the run or watch stream, and `--drift-state` persists that comparison across sessions. `--ci` adds quality-gate checks that return exit code `2` when they fail; it requires `--insights`. Built-in defect labels are `noisy_floor`, `clipping_risk`, `hard_clipping`, `under_loud`, `over_loud`, `low_perceptual_quality`, `silence_heavy`, and `dropouts`.
 
-Use `--fingerprint-sensitivity coarse|balanced|strict` to tune fingerprint bucket size. Built-in presets also tune insight label thresholds, so a podcast run treats loudness differently than a music-mastering run. `--insight-rules` accepts JSON/TOML team rules for labels, severity, suggestions, and CI gates. `--insight-snippets` exports short WAV snippets for flagged segments, and `--insights-summary` writes a compact pipeline JSON view with file, fingerprint, labels, CI checks, and triage only. The `qualiax insights` pseudo-subcommand enriches an existing JSON or JSONL report without re-analyzing audio, while `qualiax insights validate` checks existing insight payloads against the insight contract.
+Use `--fingerprint-sensitivity coarse|balanced|strict` to tune fingerprint bucket size. Built-in presets also tune insight label thresholds, so a podcast run treats loudness differently than a music-mastering run. `--insight-rules` accepts JSON/TOML team rules for labels, severity, suggestions, and CI gates. `--insight-snippets` exports short WAV snippets for flagged segments (existing snippet files are only replaced with `--force`), and `--insights-summary` writes a compact pipeline JSON view with file, fingerprint, labels, CI checks, and triage only. The `qualiax insights` pseudo-subcommand enriches an existing JSON or JSONL report without re-analyzing audio, while `qualiax insights validate` checks existing insight payloads against the insight contract. Malformed rule or baseline files are rejected before any audio is analyzed.
 
 ### Task Presets
 
@@ -484,7 +488,7 @@ The package can now be used directly from Python without shelling out to the CLI
 
 ### Sync API
 
-Analyze one file and get back a list of typed [FileResult](/Users/cleider/dev/qualiax/qualiax/models.py) objects:
+Analyze one file and get back a list of typed [FileResult](https://github.com/TheColby/qualiax/blob/main/qualiax/models.py) objects:
 
 ```python
 from qualiax import analyze
@@ -605,10 +609,10 @@ reviews = ReviewStore("reviews.json")
 reviews.decide(results[0].path, "needs-review", reviewer="qa-team")
 
 cache = AnalysisCache(".qualiax-cache")
-cache.put(results[0].source_file, results[0].to_dict())
+cache.put(results[0].path, results[0].to_dict())
 
 gate = release_readiness(
-    version="1.0.0",
+    version="1.1.0",
     tests_passed=True,
     schemas_valid=True,
     docs_present=True,
@@ -617,9 +621,23 @@ gate = release_readiness(
 ```
 
 Repair plans default to dry-run execution, never overwrite the source, and can be evaluated
-against a second analysis with `evaluate_repair(...)`. `PluginManager` discovers versioned
-entry-point plugins while isolating provider failures. `migrate_report(...)` normalizes older
-report objects to the current contract, and `ExitCode` provides stable values for automation.
+against a second analysis with `evaluate_repair(...)`. The generated ffmpeg commands use `-n`, so an
+existing output file is only replaced when you opt in with `overwrite_output`. `PluginManager`
+discovers versioned entry-point plugins while isolating provider failures. `migrate_report(...)`
+normalizes older report objects to the current contract and raises `ValueError` for unknown or
+future `schema_version` values.
+
+A few behaviors worth knowing:
+
+- `audit_dataset(...)` can only flag speaker leakage across splits when you pass `speakers=` (and
+  `splits=`), because qualiax has no speaker-identification metric.
+- `ReviewStore` re-reads its file before every write, so several stores can share one file, and it
+  raises instead of silently starting over when the file is corrupt.
+- `benchmark_budget(...)` counts a baseline metric that is missing from the current run as a failure.
+- `AnalysisCache` is a standalone helper: `analyze()` and the CLI don't consult it yet.
+- `ExitCode` provides stable values for automation, but the CLI doesn't use all of them consistently
+  yet: analysis failures exit `1`, and command-line usage errors exit `2`, the same code as a failed
+  quality gate. Both are planned for v1.2.0.
 
 ---
 
@@ -629,57 +647,69 @@ report objects to the current contract, and `ExitCode` provides stable values fo
 
 ### basic
 
-Core signal properties derived directly from the waveform. Let $x[n]$ denote the discrete audio sample at index $n$, and $N$ the total number of samples.
+Core signal properties derived directly from the waveform. Let $`x[n]`$ denote the discrete audio sample at index $`n`$, and $`N`$ the total number of samples.
 
-$$x_{rms} = \sqrt{\frac{1}{N}\sum_{n=0}^{N-1} x[n]^2}$$
+```math
+x_{rms} = \sqrt{\frac{1}{N}\sum_{n=0}^{N-1} x[n]^2}
+```
 
 This equation computes the root-mean-square amplitude, which summarizes the typical signal magnitude over the full clip.
 
-Where: $x_{rms}$ is RMS amplitude, $x[n]$ is the sample value at index $n$, and $N$ is the total number of samples.
+Where: $`x_{rms}`$ is RMS amplitude, $`x[n]`$ is the sample value at index $`n`$, and $`N`$ is the total number of samples.
 
-$$L_P = 20\log_{10}\left(\max_n \lvert x[n] \rvert\right)$$
+```math
+L_P = 20\log_{10}\left(\max_n \lvert x[n] \rvert\right)
+```
 
 This equation computes peak level in dBFS by converting the largest absolute sample magnitude into a logarithmic full-scale measurement.
 
-Where: $L_P$ is peak level in dBFS, $\max_n \lvert x[n] \rvert$ is the largest absolute sample amplitude in the file, and dBFS uses full scale as the 0 dB reference.
+Where: $`L_P`$ is peak level in dBFS, $`\max_n \lvert x[n] \rvert`$ is the largest absolute sample amplitude in the file, and dBFS uses full scale as the 0 dB reference.
 
-$$L_{rms} = 20\log_{10}(x_{rms})$$
+```math
+L_{rms} = 20\log_{10}(x_{rms})
+```
 
 This equation converts RMS amplitude into RMS level in dBFS, which is a simple loudness-like summary of the file.
 
-Where: $L_{rms}$ is RMS level in dBFS and $x_{rms}$ is the RMS amplitude defined above.
+Where: $`L_{rms}`$ is RMS level in dBFS and $`x_{rms}`$ is the RMS amplitude defined above.
 
-$$C = 20\log_{10}\left(\frac{\max_n \lvert x[n] \rvert}{x_{rms}}\right)$$
+```math
+C = 20\log_{10}\left(\frac{\max_n \lvert x[n] \rvert}{x_{rms}}\right)
+```
 
 This equation computes crest factor, which measures how far the signal peaks rise above its typical level.
 
-Where: $C$ is crest factor in dB, $\max_n \lvert x[n] \rvert$ is peak amplitude, and $x_{rms}$ is RMS amplitude.
+Where: $`C`$ is crest factor in dB, $`\max_n \lvert x[n] \rvert`$ is peak amplitude, and $`x_{rms}`$ is RMS amplitude.
 
-$$\mu = \frac{1}{N}\sum_{n=0}^{N-1} x[n]$$
+```math
+\mu = \frac{1}{N}\sum_{n=0}^{N-1} x[n]
+```
 
 This equation computes DC offset, which indicates whether the waveform is biased above or below zero.
 
-Where: $\mu$ is the mean sample value, $x[n]$ is the sample at index $n$, and $N$ is the total number of samples.
+Where: $`\mu`$ is the mean sample value, $`x[n]`$ is the sample at index $`n`$, and $`N`$ is the total number of samples.
 
-$$ZCR = \frac{1}{N-1}\sum_{n=1}^{N-1}\mathbf{1}\left[sgn(x[n]) \neq sgn(x[n-1])\right]$$
+```math
+ZCR = \frac{1}{N-1}\sum_{n=1}^{N-1}\mathbf{1}\left[sgn(x[n]) \neq sgn(x[n-1])\right]
+```
 
 This equation computes zero-crossing rate, which counts how often the waveform changes sign between adjacent samples.
 
-Where: $ZCR$ is zero-crossing rate in crossings per sample, $\mathbf{1}[\cdot]$ is 1 when the condition is true and 0 otherwise, and $sgn(\cdot)$ returns the sign of its argument.
+Where: $`ZCR`$ is zero-crossing rate in crossings per sample, $`\mathbf{1}[\cdot]`$ is 1 when the condition is true and 0 otherwise, and $`sgn(\cdot)`$ returns the sign of its argument.
 
 | Metric | Unit | Description |
 |--------|------|-------------|
-| Duration | s | $T = N / f_s$, where $f_s$ is the sample rate |
-| Sample Rate | Hz | $f_s$ |
+| Duration | s | $`T = N / f_s`$, where $`f_s`$ is the sample rate |
+| Sample Rate | Hz | $`f_s`$ |
 | Channels | — | Mono / stereo channel count |
-| Peak Amplitude | — | $\max_n \lvert x[n] \rvert$ |
-| Peak Level | dBFS | $L_P$ — 0 dBFS is full scale |
-| RMS Level | dBFS | $L_{rms}$ |
-| Crest Factor | dB | $C$ — high = dynamic or sparse signal |
-| DC Offset | — | $\mu$ — non-zero indicates a DC bias |
-| Silence Ratio | % | Fraction of samples with $\lvert x[n] \rvert < 10^{-3}$ |
-| Dynamic Range (simple) | dB | $L_P - L_{rms}$ |
-| Clipping Detected | 0/1 | 1 if any sample has $\lvert x[n] \rvert \geq 0.999$ |
+| Peak Amplitude | — | $`\max_n \lvert x[n] \rvert`$ |
+| Peak Level | dBFS | $`L_P`$ — 0 dBFS is full scale |
+| RMS Level | dBFS | $`L_{rms}`$ |
+| Crest Factor | dB | $`C`$ — high = dynamic or sparse signal |
+| DC Offset | — | $`\mu`$ — non-zero indicates a DC bias |
+| Silence Ratio | % | Fraction of samples with $`\lvert x[n] \rvert < 10^{-3}`$ |
+| Dynamic Range (simple) | dB | $`L_P - L_{rms}`$ |
+| Clipping Detected | 0/1 | 1 if any sample has $`\lvert x[n] \rvert \geq 0.999`$ |
 | Zero Crossing Rate | crossings/sample | ZCR — higher = noisier or fricative-heavy |
 | Channel N RMS / Peak Level | dBFS | Per-channel level metrics for multi-channel files |
 | Stereo Phase Correlation | — | Correlation of the first stereo pair; negative values warn about mono collapse |
@@ -691,171 +721,199 @@ Where: $ZCR$ is zero-crossing rate in crossings per sample, $\mathbf{1}[\cdot]$ 
 
 ### loudness
 
-Broadcast-standard loudness measurements per ITU-R BS.1770-4 / EBU R128. The K-weighting filter $H_K(s)$ is a two-stage shelving filter applied before integration.
+Broadcast-standard loudness measurements per ITU-R BS.1770-4 / EBU R128. The K-weighting filter $`H_K(s)`$ is a two-stage shelving filter applied before integration.
 
-$$L_K = -0.691 + 10\log_{10}\!\left(\frac{1}{T}\int_0^T \lvert x_K(t) \rvert^2 \, dt\right)$$
+```math
+L_K = -0.691 + 10\log_{10}\!\left(\frac{1}{T}\int_0^T \lvert x_K(t) \rvert^2 \, dt\right)
+```
 
 This equation computes integrated loudness in LUFS after K-weighting, which approximates perceived program loudness according to BS.1770.
 
-Where: $L_K$ is integrated loudness in LUFS, $x_K(t)$ is the K-weighted time-domain signal, $T$ is signal duration in seconds, and $-0.691$ is the BS.1770 calibration offset. Gating uses an absolute threshold of $-70$ LUFS and a relative threshold of $\bar{L} - 10$ LU, where $\bar{L}$ is the ungated integrated loudness.
+Where: $`L_K`$ is integrated loudness in LUFS, $`x_K(t)`$ is the K-weighted time-domain signal, $`T`$ is signal duration in seconds, and $`-0.691`$ is the BS.1770 calibration offset. Gating uses an absolute threshold of $`-70`$ LUFS and a relative threshold of $`\bar{L} - 10`$ LU, where $`\bar{L}`$ is the ungated integrated loudness.
 
-$$L_{TP} = 20\log_{10}\left(\max_n \lvert x_{\uparrow 4}[n] \rvert\right)$$
+```math
+L_{TP} = 20\log_{10}\left(\max_n \lvert x_{\uparrow 4}[n] \rvert\right)
+```
 
 This equation computes true-peak level by measuring the highest amplitude after 4x oversampling so inter-sample peaks are not missed.
 
-Where: $L_{TP}$ is true-peak level in dBTP, $x_{\uparrow 4}[n]$ is the waveform after 4x upsampling, and $\max_n \lvert x_{\uparrow 4}[n] \rvert$ is the largest oversampled absolute amplitude.
+Where: $`L_{TP}`$ is true-peak level in dBTP, $`x_{\uparrow 4}[n]`$ is the waveform after 4x upsampling, and $`\max_n \lvert x_{\uparrow 4}[n] \rvert`$ is the largest oversampled absolute amplitude.
 
 | Metric | Unit | Description |
 |--------|------|-------------|
-| Integrated Loudness | LUFS | Gated $L_K$. Streaming target: $-16$ to $-14$ LUFS |
-| Loudness Range (LRA) | LU | $L_{hi,95} - L_{lo,10}$ over gated 3 s blocks (EBU R128) |
-| Max Short-Term Loudness | LUFS | $\max_t L_K(t)$ over a sliding 3 s window |
-| True Peak | dBTP | $L_{TP}$ — 4× oversampled inter-sample peak. Streaming limit: $-1$ dBTP |
+| Integrated Loudness | LUFS | Gated $`L_K`$. Streaming target: $`-16`$ to $`-14`$ LUFS |
+| Loudness Range (LRA) | LU | $`L_{hi,95} - L_{lo,10}`$ over gated 3 s blocks (EBU R128) |
+| Max Short-Term Loudness | LUFS | $`\max_t L_K(t)`$ over a sliding 3 s window |
+| True Peak | dBTP | $`L_{TP}`$ — 4× oversampled inter-sample peak. Streaming limit: $`-1`$ dBTP |
 | Loudness Delta vs Platform Targets | LU | Delta from Spotify, Apple Music, YouTube, podcast, and broadcast targets. Positive = too loud; negative = too quiet |
 
 ---
 
 ### spectral
 
-Frequency-domain features computed via STFT. Notation: $X_t[k]$ = complex STFT coefficient at frame $t$ and bin $k$; $P_t[k] = \lvert X_t[k] \rvert^2$ = power; $f_k$ = center frequency of bin $k$ in Hz; $K$ = number of bins; $\langle \cdot \rangle_t$ = mean over all frames.
+Frequency-domain features computed via STFT. Notation: $`X_t[k]`$ = complex STFT coefficient at frame $`t`$ and bin $`k`$; $`P_t[k] = \lvert X_t[k] \rvert^2`$ = power; $`f_k`$ = center frequency of bin $`k`$ in Hz; $`K`$ = number of bins; $`\langle \cdot \rangle_t`$ = mean over all frames.
 
 **Centroid and Bandwidth:**
 
-$$C_t = \frac{\sum_k f_k \, P_t[k]}{\sum_k P_t[k]}, \qquad C = \langle C_t \rangle_t$$
+```math
+C_t = \frac{\sum_k f_k \, P_t[k]}{\sum_k P_t[k]}, \qquad C = \langle C_t \rangle_t
+```
 
 These equations compute spectral centroid per frame and then average it across time, so the final value represents the spectrum's energy-weighted center of mass.
 
-Where: $C_t$ is the centroid for frame $t$, $C$ is the mean centroid across frames, $f_k$ is the frequency of bin $k$, $P_t[k]$ is the power in bin $k$ at frame $t$, and $\langle \cdot \rangle_t$ denotes averaging over frames.
+Where: $`C_t`$ is the centroid for frame $`t`$, $`C`$ is the mean centroid across frames, $`f_k`$ is the frequency of bin $`k`$, $`P_t[k]`$ is the power in bin $`k`$ at frame $`t`$, and $`\langle \cdot \rangle_t`$ denotes averaging over frames.
 
-$$B_t = \sqrt{\frac{\sum_k (f_k - C_t)^2 \, P_t[k]}{\sum_k P_t[k]}}, \qquad B = \langle B_t \rangle_t$$
+```math
+B_t = \sqrt{\frac{\sum_k (f_k - C_t)^2 \, P_t[k]}{\sum_k P_t[k]}}, \qquad B = \langle B_t \rangle_t
+```
 
 These equations compute spectral bandwidth per frame and then average it, so the final value describes how widely energy spreads around the centroid.
 
-Where: $B_t$ is the bandwidth for frame $t$, $B$ is the mean bandwidth across frames, $f_k$ is the frequency of bin $k$, $C_t$ is the centroid for frame $t$, and $P_t[k]$ is the bin power.
+Where: $`B_t`$ is the bandwidth for frame $`t`$, $`B`$ is the mean bandwidth across frames, $`f_k`$ is the frequency of bin $`k`$, $`C_t`$ is the centroid for frame $`t`$, and $`P_t[k]`$ is the bin power.
 
 **Spectral Rolloff** (95th-percentile energy frequency):
 
-$$R_t = \min\left\{ f : \sum_{k:\, f_k \leq f} P_t[k] \;\geq\; 0.95 \sum_k P_t[k] \right\}, \qquad R = \langle R_t \rangle_t$$
+```math
+R_t = \min\left\{ f : \sum_{k:\, f_k \leq f} P_t[k] \;\geq\; 0.95 \sum_k P_t[k] \right\}, \qquad R = \langle R_t \rangle_t
+```
 
 These equations compute the frequency below which 95% of the frame energy lies, then average that frequency over time.
 
-Where: $R_t$ is rolloff frequency for frame $t$, $R$ is mean rolloff, $f$ is a candidate cutoff frequency, $f_k$ is the frequency of bin $k$, and $P_t[k]$ is the bin power.
+Where: $`R_t`$ is rolloff frequency for frame $`t`$, $`R`$ is mean rolloff, $`f`$ is a candidate cutoff frequency, $`f_k`$ is the frequency of bin $`k`$, and $`P_t[k]`$ is the bin power.
 
 **Spectral Flatness** (geometric-to-arithmetic power mean ratio):
 
-$$F_t = \frac{\exp\!\left(\frac{1}{K}\sum_k \ln P_t[k]\right)}{\frac{1}{K}\sum_k P_t[k]}, \qquad F_{dB} = 10\log_{10}\langle F_t \rangle_t$$
+```math
+F_t = \frac{\exp\!\left(\frac{1}{K}\sum_k \ln P_t[k]\right)}{\frac{1}{K}\sum_k P_t[k]}, \qquad F_{dB} = 10\log_{10}\langle F_t \rangle_t
+```
 
 These equations compare the geometric and arithmetic means of spectral power. Flat, noise-like spectra produce larger values, while tonal spectra produce smaller values.
 
-Where: $F_t$ is flatness for frame $t$, $F_{dB}$ is the average flatness expressed in dB, $K$ is the number of spectral bins, and $P_t[k]$ is the power in bin $k$ at frame $t$.
+Where: $`F_t`$ is flatness for frame $`t`$, $`F_{dB}`$ is the average flatness expressed in dB, $`K`$ is the number of spectral bins, and $`P_t[k]`$ is the power in bin $`k`$ at frame $`t`$.
 
-$F_{dB} = 0$ dB corresponds to white noise; more negative values indicate tonal content.
+$`F_{dB} = 0`$ dB corresponds to white noise; more negative values indicate tonal content.
 
 **Spectral Flux:**
 
-$$\Phi_t = \sqrt{\sum_k \left(\lvert X_t[k] \rvert - \lvert X_{t-1}[k] \rvert\right)^2}, \qquad \Phi = \langle \Phi_t \rangle_t$$
+```math
+\Phi_t = \sqrt{\sum_k \left(\lvert X_t[k] \rvert - \lvert X_{t-1}[k] \rvert\right)^2}, \qquad \Phi = \langle \Phi_t \rangle_t
+```
 
 These equations compute how much the spectrum changes from one frame to the next and then average that change over time.
 
-Where: $\Phi_t$ is spectral flux for frame $t$, $\Phi$ is mean spectral flux, and $\lvert X_t[k] \rvert$ and $\lvert X_{t-1}[k] \rvert$ are magnitude spectra for adjacent frames.
+Where: $`\Phi_t`$ is spectral flux for frame $`t`$, $`\Phi`$ is mean spectral flux, and $`\lvert X_t[k] \rvert`$ and $`\lvert X_{t-1}[k] \rvert`$ are magnitude spectra for adjacent frames.
 
 **Spectral Entropy:**
 
-$$H_t = -\sum_k p_{t,k} \log_2 p_{t,k}, \quad p_{t,k} = \frac{P_t[k]}{\sum_j P_t[j]}, \qquad H = \langle H_t \rangle_t \quad \text{bits}$$
+```math
+H_t = -\sum_k p_{t,k} \log_2 p_{t,k}, \quad p_{t,k} = \frac{P_t[k]}{\sum_j P_t[j]}, \qquad H = \langle H_t \rangle_t \quad \text{bits}
+```
 
 These equations normalize each frame spectrum into a probability distribution and then measure how evenly energy is spread across bins.
 
-Where: $H_t$ is entropy for frame $t$, $H$ is mean entropy, $p_{t,k}$ is the normalized power fraction in bin $k$ for frame $t$, and $P_t[k]$ is the bin power.
+Where: $`H_t`$ is entropy for frame $`t`$, $`H`$ is mean entropy, $`p_{t,k}`$ is the normalized power fraction in bin $`k`$ for frame $`t`$, and $`P_t[k]`$ is the bin power.
 
 **Estimated F0** (autocorrelation):
 
-$$\hat{f}_0 = \frac{f_s}{\hat{\tau}}, \qquad R_{xx}[\hat{\tau}] = \max_{\tau \in [\tau_{min},\, \tau_{max}]} R_{xx}[\tau]$$
+```math
+\hat{f}_0 = \frac{f_s}{\hat{\tau}}, \qquad R_{xx}[\hat{\tau}] = \max_{\tau \in [\tau_{min},\, \tau_{max}]} R_{xx}[\tau]
+```
 
 These equations estimate the fundamental frequency by finding the autocorrelation lag with the strongest periodic match and converting that lag into frequency.
 
-Where: $\hat{f}_0$ is the estimated fundamental frequency, $f_s$ is the sample rate, $\hat{\tau}$ is the selected lag in samples, $\tau_{min}$ and $\tau_{max}$ bound the allowed lag search range, and $R_{xx}[\tau] = \sum_n x[n]\,x[n+\tau]$ is the autocorrelation at lag $\tau$.
+Where: $`\hat{f}_0`$ is the estimated fundamental frequency, $`f_s`$ is the sample rate, $`\hat{\tau}`$ is the selected lag in samples, $`\tau_{min}`$ and $`\tau_{max}`$ bound the allowed lag search range, and $`R_{xx}[\tau] = \sum_n x[n]\,x[n+\tau]`$ is the autocorrelation at lag $`\tau`$.
 
-**Band Energy** in band $B$:
+**Band Energy** in band $`B`$:
 
-$$E_B = \frac{\sum_{k:\, f_k \in B} P[k]}{\sum_k P[k]} \times 100\%$$
+```math
+E_B = \frac{\sum_{k:\, f_k \in B} P[k]}{\sum_k P[k]} \times 100\%
+```
 
 This equation computes the percentage of total spectral power that falls inside a named frequency band.
 
-Where: $E_B$ is band energy as a percentage, $B$ is the selected frequency band, $f_k$ is the frequency of bin $k$, and $P[k]$ is the power in bin $k$.
+Where: $`E_B`$ is band energy as a percentage, $`B`$ is the selected frequency band, $`f_k`$ is the frequency of bin $`k`$, and $`P[k]`$ is the power in bin $`k`$.
 
 | Metric | Unit | Description |
 |--------|------|-------------|
-| Spectral Centroid | Hz | $C$ — center of mass of the power spectrum |
-| Spectral Bandwidth | Hz | $B$ — weighted std dev around centroid |
-| Spectral Rolloff (95%) | Hz | $R$ — frequency below which 95% of energy falls |
-| Spectral Flatness | dB | $F_{dB}$ — 0 dB = white noise; more negative = tonal |
-| Spectral Flux | — | $\Phi$ — mean frame-to-frame magnitude change |
-| Spectral Skewness | — | Third standardized moment of $P_t[k]$ over $k$ |
-| Spectral Entropy | bits | $H$ — 0 = single tone; $\log_2 K$ = white noise |
-| Effective Bandwidth | Hz | Frequency span with energy above $-30$ dB of peak |
-| Estimated F0 | Hz | $\hat{f}_0$ via CREPE when available, otherwise autocorrelation |
-| Band Energy: Sub-Bass (20–80 Hz) | % | $E_B$ per band |
-| Band Energy: Bass (80–300 Hz) | % | $E_B$ per band |
-| Band Energy: Low-Mid (300–2000 Hz) | % | $E_B$ per band |
-| Band Energy: Presence (2–6 kHz) | % | $E_B$ per band |
-| Band Energy: Air (6–20 kHz) | % | $E_B$ per band |
-| High-Frequency Content (HFC) | — | $\langle \sum_k f_k \cdot P_t[k] \rangle_t$ — energy weighted toward high frequencies |
+| Spectral Centroid | Hz | $`C`$ — center of mass of the power spectrum |
+| Spectral Bandwidth | Hz | $`B`$ — weighted std dev around centroid |
+| Spectral Rolloff (95%) | Hz | $`R`$ — frequency below which 95% of energy falls |
+| Spectral Flatness | dB | $`F_{dB}`$ — 0 dB = white noise; more negative = tonal |
+| Spectral Flux | — | $`\Phi`$ — mean frame-to-frame magnitude change |
+| Spectral Skewness | — | Third standardized moment of $`P_t[k]`$ over $`k`$ |
+| Spectral Entropy | bits | $`H`$ — 0 = single tone; $`\log_2 K`$ = white noise |
+| Effective Bandwidth | Hz | Frequency span with energy above $`-30`$ dB of peak |
+| Estimated F0 | Hz | $`\hat{f}_0`$ via CREPE when available, otherwise autocorrelation |
+| Band Energy: Sub-Bass (20–80 Hz) | % | $`E_B`$ per band |
+| Band Energy: Bass (80–300 Hz) | % | $`E_B`$ per band |
+| Band Energy: Low-Mid (300–2000 Hz) | % | $`E_B`$ per band |
+| Band Energy: Presence (2–6 kHz) | % | $`E_B`$ per band |
+| Band Energy: Air (6–20 kHz) | % | $`E_B`$ per band |
+| High-Frequency Content (HFC) | — | $`\langle \sum_k f_k \cdot P_t[k] \rangle_t`$ — energy weighted toward high frequencies |
 
 ---
 
 ### temporal
 
-Time-domain structure, speech activity, and pause patterns. Frame energy at frame $m$:
+Time-domain structure, speech activity, and pause patterns. Frame energy at frame $`m`$:
 
-$$E_m = \frac{1}{L}\sum_{n=0}^{L-1} x[mH + n]^2$$
+```math
+E_m = \frac{1}{L}\sum_{n=0}^{L-1} x[mH + n]^2
+```
 
 This equation computes short-time frame energy, which is the basis for activity detection, pause finding, and temporal dynamics.
 
-Where: $E_m$ is frame energy for frame $m$, $L$ is frame length in samples, $H$ is hop size in samples, $x[\cdot]$ is the waveform, and $m$ is the frame index. In practice, $L$ corresponds to 25 ms and $H$ corresponds to 10 ms. We also use $E_m^{dB} = 10\log_{10}(E_m)$ and a VAD threshold $\theta = \max(P_{30}(E^{dB}), -50 \text{ dBFS})$, where $P_{30}$ is the 30th percentile of frame-energy values and $M$ is the total number of frames.
+Where: $`E_m`$ is frame energy for frame $`m`$, $`L`$ is frame length in samples, $`H`$ is hop size in samples, $`x[\cdot]`$ is the waveform, and $`m`$ is the frame index. In practice, $`L`$ corresponds to 25 ms and $`H`$ corresponds to 10 ms. We also use $`E_m^{dB} = 10\log_{10}(E_m)`$ and a VAD threshold $`\theta = \max(P_{30}(E^{dB}), -50 \text{ dBFS})`$, where $`P_{30}`$ is the 30th percentile of frame-energy values and $`M`$ is the total number of frames.
 
 **Temporal Centroid:**
 
-$$\bar{t} = \frac{\sum_m t_m \, E_m}{\sum_m E_m}$$
+```math
+\bar{t} = \frac{\sum_m t_m \, E_m}{\sum_m E_m}
+```
 
 This equation computes the energy-weighted center of time, so earlier energy pulls the value left and later energy pulls it right.
 
-Where: $\bar{t}$ is temporal centroid in seconds, $t_m = mH / f_s$ is the time stamp of frame $m$, $E_m$ is frame energy, $H$ is hop size in samples, and $f_s$ is the sample rate.
+Where: $`\bar{t}`$ is temporal centroid in seconds, $`t_m = mH / f_s`$ is the time stamp of frame $`m`$, $`E_m`$ is frame energy, $`H`$ is hop size in samples, and $`f_s`$ is the sample rate.
 
 | Metric | Unit | Description |
 |--------|------|-------------|
-| Speech/Activity Ratio | % | $\frac{1}{M}\sum_m \mathbf{1}[E_m^{dB} > \theta] \times 100$ |
-| Attack Time | ms | Time to reach $0.9 \cdot \max_m E_m$ from start |
-| Temporal Centroid | s | $\bar{t}$ — energy-weighted mean time |
+| Speech/Activity Ratio | % | $`\frac{1}{M}\sum_m \mathbf{1}[E_m^{dB} > \theta] \times 100`$ |
+| Attack Time | ms | Time to reach $`0.9 \cdot \max_m E_m`$ from start |
+| Temporal Centroid | s | $`\bar{t}`$ — energy-weighted mean time |
 | Num Pauses (>100 ms) | — | Count of contiguous inactive runs longer than 100 ms |
 | Mean Pause Duration | s | Mean length of detected pauses |
 | Max Pause Duration | s | Length of the longest detected pause |
-| Energy Variance | dB² | $Var(E^{dB})$ — high = dynamic, low = monotone |
-| ZCR Mean | crossings/sample | $\langle ZCR_m \rangle_m$ |
-| ZCR Variance | — | $Var(ZCR_m)$ |
+| Energy Variance | dB² | $`Var(E^{dB})`$ — high = dynamic, low = monotone |
+| ZCR Mean | crossings/sample | $`\langle ZCR_m \rangle_m`$ |
+| ZCR Variance | — | $`Var(ZCR_m)`$ |
 
 ---
 
 ### noise
 
-Noise floor and signal quality estimates. The noise floor $\hat{N}$ is the mean energy of the quietest 10% of frames.
+Noise floor and signal quality estimates. The noise floor $`\hat{N}`$ is the mean energy of the quietest 10% of frames.
 
-$$\text{SNR} = 10\log_{10}\left(\frac{P_{\text{signal}}}{P_{\text{noise}}}\right) \;\text{dB}$$
+```math
+\text{SNR} = 10\log_{10}\left(\frac{P_{\text{signal}}}{P_{\text{noise}}}\right) \;\text{dB}
+```
 
 This equation estimates signal-to-noise ratio by comparing high-activity frame power against low-activity frame power.
 
-Where: $\text{SNR}$ is signal-to-noise ratio in dB, $P_{signal}$ is the mean frame power of the most active 50% of frames, and $P_{noise}$ is the mean frame power of the quietest 10% of frames.
+Where: $`\text{SNR}`$ is signal-to-noise ratio in dB, $`P_{signal}`$ is the mean frame power of the most active 50% of frames, and $`P_{noise}`$ is the mean frame power of the quietest 10% of frames.
 
-$$\text{HNR} = 10\log_{10}\left(\frac{P_{\text{harmonic}}}{P_{\text{aperiodic}}}\right) \;\text{dB}$$
+```math
+\text{HNR} = 10\log_{10}\left(\frac{P_{\text{harmonic}}}{P_{\text{aperiodic}}}\right) \;\text{dB}
+```
 
 This equation estimates harmonic-to-noise ratio by comparing periodic harmonic energy against residual aperiodic energy.
 
-Where: $\text{HNR}$ is harmonic-to-noise ratio in dB, $P_{harmonic}$ is power concentrated at harmonic multiples of the estimated fundamental frequency, and $P_{aperiodic}$ is the remaining non-harmonic power.
+Where: $`\text{HNR}`$ is harmonic-to-noise ratio in dB, $`P_{harmonic}`$ is power concentrated at harmonic multiples of the estimated fundamental frequency, and $`P_{aperiodic}`$ is the remaining non-harmonic power.
 
 | Metric | Unit | Description |
 |--------|------|-------------|
-| Estimated Noise Floor | dBFS | $\hat{N} = \langle E_m^{dB} \rangle$ over quietest 10% of frames |
-| Estimated SNR | dB | $\langle E_m^{dB} \rangle_{active} - \hat{N}$ |
-| Spectral SNR | dB | $10\log_{10}(P_{active} / P_{quiet})$ in the frequency domain |
+| Estimated Noise Floor | dBFS | $`\hat{N} = \langle E_m^{dB} \rangle`$ over quietest 10% of frames |
+| Estimated SNR | dB | $`\langle E_m^{dB} \rangle_{active} - \hat{N}`$ |
+| Spectral SNR | dB | $`10\log_{10}(P_{active} / P_{quiet})`$ in the frequency domain |
 | Harmonic-to-Noise Ratio (HNR) | dB | HNR — higher = cleaner voiced speech |
 | Near-Clipped Samples | count | Samples within 1 dB of full scale |
 | Detected Dropouts | count | Sudden near-silence drops in otherwise active audio |
@@ -866,35 +924,41 @@ Where: $\text{HNR}$ is harmonic-to-noise ratio in dB, $P_{harmonic}$ is power co
 
 Speech-specific features computed on a mono signal. MFCCs are computed from the log Mel filterbank via DCT-II:
 
-$$c_k = \sqrt{\frac{2}{M}}\sum_{j=1}^{M} m_j \cos\!\left(\frac{\pi k (j - 0.5)}{M}\right), \quad k = 1, \ldots, 13$$
+```math
+c_k = \sqrt{\frac{2}{M}}\sum_{j=1}^{M} m_j \cos\!\left(\frac{\pi k (j - 0.5)}{M}\right), \quad k = 1, \ldots, 13
+```
 
 This equation computes the first 13 MFCCs from the log Mel spectrum, which compactly summarize speech spectral shape.
 
-Where: $c_k$ is MFCC coefficient $k$, $M$ is the number of Mel filters, $m_j = \log(\mathbf{f}_j^\top \mathbf{p} + \varepsilon)$ is the log energy in Mel filter $j$, $\mathbf{f}_j$ is the $j$th Mel filter, $\mathbf{p}$ is the frame power spectrum, and $\varepsilon$ is a small constant used to avoid $\log(0)$. In practice, $M = 40$ spanning roughly 80 Hz to 8 kHz.
+Where: $`c_k`$ is MFCC coefficient $`k`$, $`M`$ is the number of Mel filters, $`m_j = \log(\mathbf{f}_j^\top \mathbf{p} + \varepsilon)`$ is the log energy in Mel filter $`j`$, $`\mathbf{f}_j`$ is the $`j`$th Mel filter, $`\mathbf{p}`$ is the frame power spectrum, and $`\varepsilon`$ is a small constant used to avoid $`\log(0)`$. In practice, $`M = 40`$ spanning roughly 80 Hz to 8 kHz.
 
-MFCC statistics over $T$ frames:
+MFCC statistics over $`T`$ frames:
 
-$$\bar{c}_k = \frac{1}{T}\sum_{t=1}^T c_k(t), \qquad \sigma_k = \sqrt{\frac{1}{T}\sum_{t=1}^T \left(c_k(t) - \bar{c}_k\right)^2}$$
+```math
+\bar{c}_k = \frac{1}{T}\sum_{t=1}^T c_k(t), \qquad \sigma_k = \sqrt{\frac{1}{T}\sum_{t=1}^T \left(c_k(t) - \bar{c}_k\right)^2}
+```
 
 These equations summarize each MFCC over time using its mean and standard deviation.
 
-Where: $\bar{c}_k$ is the mean of coefficient $k$ over all frames, $\sigma_k$ is the standard deviation of coefficient $k$, $c_k(t)$ is coefficient $k$ at frame $t$, and $T$ is the number of analyzed frames.
+Where: $`\bar{c}_k`$ is the mean of coefficient $`k`$ over all frames, $`\sigma_k`$ is the standard deviation of coefficient $`k`$, $`c_k(t)`$ is coefficient $`k`$ at frame $`t`$, and $`T`$ is the number of analyzed frames.
 
 **Active Speech Level** (ASL, P.56-inspired):
 
-$$ASL = 20\log_{10}\left(\sqrt{\frac{1}{|A|}\sum_{m \in A} r_m^2}\right)$$
+```math
+ASL = 20\log_{10}\left(\sqrt{\frac{1}{|A|}\sum_{m \in A} r_m^2}\right)
+```
 
 This equation reports the RMS level of speech-active frames only, so pauses and long silences do not drag the speech level downward.
 
-Where: $ASL$ is active speech level in dBFS, $A$ is the set of speech-active frames selected by an activity gate, $|A|$ is the number of active frames, and $r_m$ is the RMS amplitude of frame $m$.
+Where: $`ASL`$ is active speech level in dBFS, $`A`$ is the set of speech-active frames selected by an activity gate, $`|A|`$ is the number of active frames, and $`r_m`$ is the RMS amplitude of frame $`m`$.
 
 | Metric | Unit | Description |
 |--------|------|-------------|
-| MFCC 1–13 Mean | — | $\bar{c}_k$ per coefficient |
-| MFCC 1–13 Std | — | $\sigma_k$ per coefficient |
-| F1-Region Energy (300–1000 Hz) | % | $E_B$ in first formant band |
-| F2-Region Energy (1–2.5 kHz) | % | $E_B$ in second formant band |
-| F3-Region Energy (2.5–3.5 kHz) | % | $E_B$ in third formant band |
+| MFCC 1–13 Mean | — | $`\bar{c}_k`$ per coefficient |
+| MFCC 1–13 Std | — | $`\sigma_k`$ per coefficient |
+| F1-Region Energy (300–1000 Hz) | % | $`E_B`$ in first formant band |
+| F2-Region Energy (1–2.5 kHz) | % | $`E_B`$ in second formant band |
+| F3-Region Energy (2.5–3.5 kHz) | % | $`E_B`$ in third formant band |
 | Voiced/Unvoiced Ratio | — | Voiced frames (low ZCR + high energy) divided by unvoiced frames |
 | Active Speech Level (ASL) | dBFS | P.56-inspired RMS level over speech-active frames |
 | Speech-Band SNR (300 Hz – 3.4 kHz) | dB | SNR restricted to the telephone/speech band |
@@ -907,35 +971,43 @@ Perceptual quality scores. Non-intrusive proxies are used by default; supply `--
 
 **SI-SDR** (scale-invariant signal-to-distortion ratio):
 
-$$\text{SI-SDR} = 10\log_{10}\!\left(\frac{\lVert \alpha \mathbf{r} \rVert^2}{\lVert \hat{\mathbf{x}} - \alpha \mathbf{r} \rVert^2}\right), \qquad \alpha = \frac{\hat{\mathbf{x}}^\top \mathbf{r}}{\lVert \mathbf{r} \rVert^2}$$
+```math
+\text{SI-SDR} = 10\log_{10}\!\left(\frac{\lVert \alpha \mathbf{r} \rVert^2}{\lVert \hat{\mathbf{x}} - \alpha \mathbf{r} \rVert^2}\right), \qquad \alpha = \frac{\hat{\mathbf{x}}^\top \mathbf{r}}{\lVert \mathbf{r} \rVert^2}
+```
 
 This equation computes the distortion level after optimally rescaling the reference to match the degraded signal, which makes the score invariant to overall gain.
 
-Where: $\text{SI-SDR}$ is scale-invariant signal-to-distortion ratio in dB, $\hat{\mathbf{x}}$ is the zero-mean degraded signal vector, $\mathbf{r}$ is the zero-mean reference vector, $\alpha$ is the least-squares projection scalar, and $\hat{\mathbf{x}} - \alpha \mathbf{r}$ is the residual distortion vector.
+Where: $`\text{SI-SDR}`$ is scale-invariant signal-to-distortion ratio in dB, $`\hat{\mathbf{x}}`$ is the zero-mean degraded signal vector, $`\mathbf{r}`$ is the zero-mean reference vector, $`\alpha`$ is the least-squares projection scalar, and $`\hat{\mathbf{x}} - \alpha \mathbf{r}`$ is the residual distortion vector.
 
 **SDR:**
 
-$$\text{SDR} = 10\log_{10}\!\left(\frac{\lVert \mathbf{r} \rVert^2}{\lVert \mathbf{r} - \hat{\mathbf{x}} \rVert^2}\right)$$
+```math
+\text{SDR} = 10\log_{10}\!\left(\frac{\lVert \mathbf{r} \rVert^2}{\lVert \mathbf{r} - \hat{\mathbf{x}} \rVert^2}\right)
+```
 
 This equation computes a simpler signal-to-distortion ratio without scale normalization, so gain mismatches directly affect the result.
 
-Where: $\text{SDR}$ is signal-to-distortion ratio in dB, $\mathbf{r}$ is the reference signal vector, and $\hat{\mathbf{x}}$ is the degraded signal vector.
+Where: $`\text{SDR}`$ is signal-to-distortion ratio in dB, $`\mathbf{r}`$ is the reference signal vector, and $`\hat{\mathbf{x}}`$ is the degraded signal vector.
 
 **Log-Spectral Distance:**
 
-$$\text{LSD} = \frac{1}{KT}\sum_{t,k} \left\lvert \log \lvert X_t[k] \rvert^2 - \log \lvert R_t[k] \rvert^2 \right\rvert$$
+```math
+\text{LSD} = \frac{1}{KT}\sum_{t,k} \left\lvert \log \lvert X_t[k] \rvert^2 - \log \lvert R_t[k] \rvert^2 \right\rvert
+```
 
 This equation computes the average absolute gap between the degraded and reference log spectra across all bins and frames.
 
-Where: $\text{LSD}$ is log-spectral distance, $K$ is the number of frequency bins, $T$ is the number of frames, $X_t[k]$ is the degraded STFT coefficient at frame $t$ and bin $k$, and $R_t[k]$ is the reference STFT coefficient at frame $t$ and bin $k$.
+Where: $`\text{LSD}`$ is log-spectral distance, $`K`$ is the number of frequency bins, $`T`$ is the number of frames, $`X_t[k]`$ is the degraded STFT coefficient at frame $`t`$ and bin $`k`$, and $`R_t[k]`$ is the reference STFT coefficient at frame $`t`$ and bin $`k`$.
 
 **Cepstral Distance:**
 
-$$\text{CD} = \frac{1}{T}\sum_{t=1}^T \sqrt{\sum_{k=1}^{13}\left(c_k(t) - c_k^{(r)}(t)\right)^2}$$
+```math
+\text{CD} = \frac{1}{T}\sum_{t=1}^T \sqrt{\sum_{k=1}^{13}\left(c_k(t) - c_k^{(r)}(t)\right)^2}
+```
 
 This equation computes the Euclidean distance between degraded and reference MFCC vectors and then averages that distance over time.
 
-Where: $\text{CD}$ is cepstral distance, $T$ is the number of frames, $c_k(t)$ is degraded MFCC coefficient $k$ at frame $t$, and $c_k^{(r)}(t)$ is reference MFCC coefficient $k$ at frame $t$.
+Where: $`\text{CD}`$ is cepstral distance, $`T`$ is the number of frames, $`c_k(t)`$ is degraded MFCC coefficient $`k`$ at frame $`t`$, and $`c_k^{(r)}(t)`$ is reference MFCC coefficient $`k`$ at frame $`t`$.
 
 | Metric | Unit | Notes |
 |--------|------|-------|
@@ -961,40 +1033,46 @@ Per-frame F0 trajectory, perturbation measures, and speech rate. qualiax uses CR
 
 **Normalized autocorrelation F0 detection:**
 
-$$r_{xx}[\tau] = \frac{\sum_n x[n]\, x[n+\tau]}{\sum_n x[n]^2}, \qquad \hat{f}_0 = \frac{f_s}{\hat{\tau}}, \qquad r_{xx}[\hat{\tau}] = \max_{\tau \in [\tau_{min},\, \tau_{max}]} r_{xx}[\tau]$$
+```math
+r_{xx}[\tau] = \frac{\sum_n x[n]\, x[n+\tau]}{\sum_n x[n]^2}, \qquad \hat{f}_0 = \frac{f_s}{\hat{\tau}}, \qquad r_{xx}[\hat{\tau}] = \max_{\tau \in [\tau_{min},\, \tau_{max}]} r_{xx}[\tau]
+```
 
 These equations compute normalized autocorrelation, choose the strongest periodic lag in the allowed pitch range, and convert that lag into a fundamental-frequency estimate.
 
-Where: $r_{xx}[\tau]$ is normalized autocorrelation at lag $\tau$, $\hat{f}_0$ is the estimated fundamental frequency, $f_s$ is the sample rate, $\hat{\tau}$ is the selected lag in samples, $\tau_{min} = \lfloor f_s / f_{0,max} \rfloor$, $\tau_{max} = \lfloor f_s / f_{0,min} \rfloor$, $f_{0,min} = 60$ Hz, and $f_{0,max} = 500$ Hz. A frame is treated as voiced when $r_{xx}[\hat{\tau}] > 0.40$.
+Where: $`r_{xx}[\tau]`$ is normalized autocorrelation at lag $`\tau`$, $`\hat{f}_0`$ is the estimated fundamental frequency, $`f_s`$ is the sample rate, $`\hat{\tau}`$ is the selected lag in samples, $`\tau_{min} = \lfloor f_s / f_{0,max} \rfloor`$, $`\tau_{max} = \lfloor f_s / f_{0,min} \rfloor`$, $`f_{0,min} = 60`$ Hz, and $`f_{0,max} = 500`$ Hz. A frame is treated as voiced when $`r_{xx}[\hat{\tau}] > 0.40`$.
 
 **Jitter** (local F0 period perturbation, Baken & Orlikoff 2000):
 
-$$J = \frac{1}{\bar{T}(N-1)} \sum_{i=1}^{N-1} \lvert T_i - T_{i-1} \rvert \times 100\%, \qquad \bar{T} = \frac{1}{N}\sum_{i=1}^{N} T_i$$
+```math
+J = \frac{1}{\bar{T}(N-1)} \sum_{i=1}^{N-1} \lvert T_i - T_{i-1} \rvert \times 100\%, \qquad \bar{T} = \frac{1}{N}\sum_{i=1}^{N} T_i
+```
 
 This equation computes local jitter by measuring how much consecutive voiced periods fluctuate relative to their mean period.
 
-Where: $J$ is local jitter in percent, $T_i = 1 / f_{0,i}$ is the period of voiced frame $i$, $\bar{T}$ is the mean voiced period, $f_{0,i}$ is the fundamental frequency of voiced frame $i$, and $N$ is the number of voiced frames used in the estimate.
+Where: $`J`$ is local jitter in percent, $`T_i = 1 / f_{0,i}`$ is the period of voiced frame $`i`$, $`\bar{T}`$ is the mean voiced period, $`f_{0,i}`$ is the fundamental frequency of voiced frame $`i`$, and $`N`$ is the number of voiced frames used in the estimate.
 
 **Shimmer** (local amplitude perturbation):
 
-$$S = \frac{1}{\bar{A}(N-1)} \sum_{i=1}^{N-1} \lvert A_i - A_{i-1} \rvert \times 100\%, \qquad \bar{A} = \frac{1}{N}\sum_{i=1}^{N} A_i$$
+```math
+S = \frac{1}{\bar{A}(N-1)} \sum_{i=1}^{N-1} \lvert A_i - A_{i-1} \rvert \times 100\%, \qquad \bar{A} = \frac{1}{N}\sum_{i=1}^{N} A_i
+```
 
 This equation computes local shimmer by measuring frame-to-frame amplitude variation relative to the mean voiced amplitude.
 
-Where: $S$ is local shimmer in percent, $A_i$ is the RMS amplitude of voiced frame $i$, $\bar{A}$ is the mean voiced amplitude, and $N$ is the number of voiced frames used in the estimate.
+Where: $`S`$ is local shimmer in percent, $`A_i`$ is the RMS amplitude of voiced frame $`i`$, $`\bar{A}`$ is the mean voiced amplitude, and $`N`$ is the number of voiced frames used in the estimate.
 
 | Metric | Unit | Description |
 |--------|------|-------------|
-| Voiced Frame Ratio | % | Fraction of frames with $r_{xx}[\hat{\tau}] > 0.40$ |
+| Voiced Frame Ratio | % | Fraction of frames with $`r_{xx}[\hat{\tau}] > 0.40`$ |
 | F0 Estimator Backend | — | `crepe` when available, otherwise `autocorrelation` |
 | F0 Mean | Hz | Mean F0 over voiced frames |
 | F0 Std | Hz | Standard deviation of voiced F0 |
 | F0 Min / Max | Hz | Extremes of voiced F0 |
-| F0 Range | Hz | $f_{0,\max} - f_{0,\min}$ |
-| Pitch Variability (CV) | % | $\sigma_{f_0} / \bar{f}_0 \times 100$ — higher = more expressive |
-| F0 Slope | Hz/s | Linear regression slope of $f_0(t)$ over voiced frames |
-| Jitter (Local) | % | $J$ — normal speech below 1%; higher = dysphonia or roughness |
-| Shimmer (Local) | % | $S$ — normal speech below 3%; higher = breathiness or hoarseness |
+| F0 Range | Hz | $`f_{0,\max} - f_{0,\min}`$ |
+| Pitch Variability (CV) | % | $`\sigma_{f_0} / \bar{f}_0 \times 100`$ — higher = more expressive |
+| F0 Slope | Hz/s | Linear regression slope of $`f_0(t)`$ over voiced frames |
+| Jitter (Local) | % | $`J`$ — normal speech below 1%; higher = dysphonia or roughness |
+| Shimmer (Local) | % | $`S`$ — normal speech below 3%; higher = breathiness or hoarseness |
 | Tremor Rate | Hz | Dominant spectral peak of F0 modulation in the 2–15 Hz band |
 | Tremor Depth | Hz² | Power of the dominant F0 modulation component |
 | Estimated Speech Rate | syll/s | Energy-envelope peak count / duration. Typical: 3–7 syll/s |
@@ -1003,53 +1081,63 @@ Where: $S$ is local shimmer in percent, $A_i$ is the RMS amplitude of voiced fra
 
 ### psychoacoustic
 
-Perceptual features based on auditory models using Bark-scale critical-band analysis. The Bark scale $z$ is (Traunmüller 1990):
+Perceptual features based on auditory models using Bark-scale critical-band analysis. The Bark scale $`z`$ is (Traunmüller 1990):
 
-$$z = \frac{26.81 \, f}{1960 + f} - 0.53$$
+```math
+z = \frac{26.81 \, f}{1960 + f} - 0.53
+```
 
 This equation maps frequency in Hz onto the Bark scale, which better reflects auditory critical-band spacing than linear frequency.
 
-Where: $z$ is Bark-scale position and $f$ is frequency in Hz.
+Where: $`z`$ is Bark-scale position and $`f`$ is frequency in Hz.
 
 **Roughness** (Vassilakis 2001) — amplitude modulation between spectral partial pairs:
 
-$$R = \sum_{i < j} \left(\frac{A_i A_j}{A_i^2 + A_j^2}\right)^{3.11} (A_i A_j)^{0.1} \cdot x^2 e^{-(x/0.25)^2}, \qquad x = \frac{\lvert f_j - f_i \rvert}{\text{CBW}(f_i)}$$
+```math
+R = \sum_{i < j} \left(\frac{A_i A_j}{A_i^2 + A_j^2}\right)^{3.11} (A_i A_j)^{0.1} \cdot x^2 e^{-(x/0.25)^2}, \qquad x = \frac{\lvert f_j - f_i \rvert}{\text{CBW}(f_i)}
+```
 
 This equation estimates auditory roughness by summing beating interactions between partial pairs, with the strongest contribution when their spacing is a quarter of a critical bandwidth.
 
-Where: $R$ is roughness, $A_i$ and $A_j$ are normalized amplitudes of partials $i$ and $j$, $f_i$ and $f_j$ are their frequencies in Hz with $f_i < f_j$, $x$ is normalized frequency spacing, and $CBW(f_i) = 25 + 75\left(1 + 1.4(f_i/1000)^2\right)^{0.69}$ is the critical bandwidth around $f_i$.
+Where: $`R`$ is roughness, $`A_i`$ and $`A_j`$ are normalized amplitudes of partials $`i`$ and $`j`$, $`f_i`$ and $`f_j`$ are their frequencies in Hz with $`f_i < f_j`$, $`x`$ is normalized frequency spacing, and $`CBW(f_i) = 25 + 75\left(1 + 1.4(f_i/1000)^2\right)^{0.69}`$ is the critical bandwidth around $`f_i`$.
 
 **Sensory Dissonance** (Sethares 1993):
 
-$$D = \sum_{i < j} A_i A_j \left(e^{-b_1 s \lvert f_j - f_i \rvert} - e^{-b_2 s \lvert f_j - f_i \rvert}\right), \qquad s = \frac{0.24}{0.0207 f_i + 18.96}$$
+```math
+D = \sum_{i < j} A_i A_j \left(e^{-b_1 s \lvert f_j - f_i \rvert} - e^{-b_2 s \lvert f_j - f_i \rvert}\right), \qquad s = \frac{0.24}{0.0207 f_i + 18.96}
+```
 
 This equation estimates sensory dissonance by summing how strongly each partial pair is expected to beat within the auditory system.
 
-Where: $D$ is sensory dissonance, $A_i$ and $A_j$ are normalized partial amplitudes, $f_i$ and $f_j$ are partial frequencies, $b_1 = 3.5$ and $b_2 = 5.75$ are empirical constants, and $s = 0.24 / (0.0207 f_i + 18.96)$ is the lower-partial scaling factor.
+Where: $`D`$ is sensory dissonance, $`A_i`$ and $`A_j`$ are normalized partial amplitudes, $`f_i`$ and $`f_j`$ are partial frequencies, $`b_1 = 3.5`$ and $`b_2 = 5.75`$ are empirical constants, and $`s = 0.24 / (0.0207 f_i + 18.96)`$ is the lower-partial scaling factor.
 
 **Sharpness** (Zwicker & Fastl 1990; Von Bismarck 1974):
 
-$$S_{acum} = 0.11 \frac{\sum_z N'(z)\, g(z)\, z}{\sum_z N'(z)}, \qquad g(z) = \begin{cases} 1 & z \leq 15 \\ 0.066\, e^{0.171 z} & z > 15 \end{cases}$$
+```math
+S_{acum} = 0.11 \frac{\sum_z N'(z)\, g(z)\, z}{\sum_z N'(z)}, \qquad g(z) = \begin{cases} 1 & z \leq 15 \\ 0.066\, e^{0.171 z} & z > 15 \end{cases}
+```
 
 This equation computes sharpness by weighting specific loudness toward higher Bark bands, so bright high-frequency energy contributes more strongly.
 
-Where: $S_{acum}$ is sharpness in acum, $z$ is Bark-band position, $N'(z)$ is specific loudness in band $z$, and $g(z)$ is the high-frequency weighting function defined piecewise above.
+Where: $`S_{acum}`$ is sharpness in acum, $`z`$ is Bark-band position, $`N'(z)`$ is specific loudness in band $`z`$, and $`g(z)`$ is the high-frequency weighting function defined piecewise above.
 
 **Spectral Flatness and Tonality:**
 
-$$\text{SFM} = \frac{\exp\!\left(\frac{1}{K}\sum_k \ln P[k]\right)}{\frac{1}{K}\sum_k P[k]}, \qquad \text{Tonality} = 1 - \text{SFM}$$
+```math
+\text{SFM} = \frac{\exp\!\left(\frac{1}{K}\sum_k \ln P[k]\right)}{\frac{1}{K}\sum_k P[k]}, \qquad \text{Tonality} = 1 - \text{SFM}
+```
 
 These equations compute spectral flatness and then derive tonality as its complement, so tonal signals push tonality upward while noise-like signals push it downward.
 
-Where: $\text{SFM}$ is spectral flatness measure, $\text{Tonality}$ is the derived tonality score, $K$ is the number of spectral bins, and $P[k]$ is the power in bin $k$.
+Where: $`\text{SFM}`$ is spectral flatness measure, $`\text{Tonality}`$ is the derived tonality score, $`K`$ is the number of spectral bins, and $`P[k]`$ is the power in bin $`k`$.
 
 | Metric | Unit | Description |
 |--------|------|-------------|
-| Roughness | asper (rel.) | $R$ — Vassilakis AM roughness. High = grating or harsh |
-| Sensory Dissonance | (rel.) | $D$ — Sethares beating model. Low = consonant spectrum |
-| Sharpness | acum | $S_{acum}$ — 1 acum = reference 1 kHz narrow-band noise |
+| Roughness | asper (rel.) | $`R`$ — Vassilakis AM roughness. High = grating or harsh |
+| Sensory Dissonance | (rel.) | $`D`$ — Sethares beating model. Low = consonant spectrum |
+| Sharpness | acum | $`S_{acum}`$ — 1 acum = reference 1 kHz narrow-band noise |
 | Spectral Flatness (SFM) | 0–1 | 0 = pure sine tone; 1 = white noise |
-| Tonality | 0–1 | $1 - \text{SFM}$. High = tonal; low = noise-like |
+| Tonality | 0–1 | $`1 - \text{SFM}`$. High = tonal; low = noise-like |
 
 ---
 
@@ -1057,29 +1145,35 @@ Where: $\text{SFM}$ is spectral flatness measure, $\text{Tonality}$ is the deriv
 
 Voice characteristics and speaker demographics estimated from acoustic features. All estimates are heuristic approximations, not biometric classifiers.
 
-**LPC Formant Tracking** — order-$p$ LPC via Levinson-Durbin on the Yule-Walker system:
+**LPC Formant Tracking** — order-$`p`$ LPC via Levinson-Durbin on the Yule-Walker system:
 
-$$\mathbf{R}\,\mathbf{a} = -\mathbf{r}_{1:p}, \qquad \mathbf{R}_{ij} = r[\lvert i - j \rvert]$$
+```math
+\mathbf{R}\,\mathbf{a} = -\mathbf{r}_{1:p}, \qquad \mathbf{R}_{ij} = r[\lvert i - j \rvert]
+```
 
 This equation solves the LPC normal equations, which estimate an all-pole vocal-tract model from short-time speech autocorrelation.
 
-Where: $\mathbf{R}$ is the $p \times p$ symmetric Toeplitz autocorrelation matrix, $\mathbf{a} = [a_1, \ldots, a_p]^T$ is the LPC coefficient vector, $r[k] = \frac{1}{N}\sum_n x[n]\, x[n+k]$ is biased autocorrelation at lag $k$, and $p = 12$ is the LPC order used here.
+Where: $`\mathbf{R}`$ is the $`p \times p`$ symmetric Toeplitz autocorrelation matrix, $`\mathbf{a} = [a_1, \ldots, a_p]^T`$ is the LPC coefficient vector, $`r[k] = \frac{1}{N}\sum_n x[n]\, x[n+k]`$ is biased autocorrelation at lag $`k`$, and $`p = 12`$ is the LPC order used here.
 
-Formant frequencies and bandwidths from LPC polynomial roots $z_k$ in the upper half of the complex plane:
+Formant frequencies and bandwidths from LPC polynomial roots $`z_k`$ in the upper half of the complex plane:
 
-$$F_k = \frac{\phi_k f_s}{2\pi}, \qquad BW_k = \frac{-\ln \lvert z_k \rvert \cdot f_s}{\pi}$$
+```math
+F_k = \frac{\phi_k f_s}{2\pi}, \qquad BW_k = \frac{-\ln \lvert z_k \rvert \cdot f_s}{\pi}
+```
 
 These equations convert LPC roots into formant frequency and bandwidth estimates.
 
-Where: $F_k$ is the frequency of formant candidate $k$, $BW_k$ is its bandwidth, $\phi_k$ is the phase angle of root $z_k$ in radians, $f_s$ is the sample rate, and $\lvert z_k \rvert$ is the magnitude of root $z_k$. The LPC polynomial is $A(z) = 1 + a_1 z^{-1} + \cdots + a_p z^{-p}$. Only roots with $50 < F_k < 5500$ Hz and $BW_k < 600$ Hz are retained.
+Where: $`F_k`$ is the frequency of formant candidate $`k`$, $`BW_k`$ is its bandwidth, $`\phi_k`$ is the phase angle of root $`z_k`$ in radians, $`f_s`$ is the sample rate, and $`\lvert z_k \rvert`$ is the magnitude of root $`z_k`$. The LPC polynomial is $`A(z) = 1 + a_1 z^{-1} + \cdots + a_p z^{-p}`$. Only roots with $`50 < F_k < 5500`$ Hz and $`BW_k < 600`$ Hz are retained.
 
 **Cepstral Peak Prominence** (Hillenbrand et al. 1994):
 
-$$\text{CPP} = \max_{q \in [q_{\min},\, q_{\max}]} \left[ c[q] - \hat{c}[q] \right]$$
+```math
+\text{CPP} = \max_{q \in [q_{\min},\, q_{\max}]} \left[ c[q] - \hat{c}[q] \right]
+```
 
 This equation measures how strongly the dominant cepstral pitch peak rises above its smooth baseline, which is a proxy for periodic voice clarity.
 
-Where: $\text{CPP}$ is cepstral peak prominence in dB, $q$ is quefrency in samples, $q_{min}$ and $q_{max}$ define the searched quefrency range, $c[q] = \lvert \mathcal{F}^{-1}\{\log \lvert X \rvert^2\} \rvert$ is the real cepstrum, and $\hat{c}[q]$ is the linear-regression baseline over the pitch-relevant quefrency interval.
+Where: $`\text{CPP}`$ is cepstral peak prominence in dB, $`q`$ is quefrency in samples, $`q_{min}`$ and $`q_{max}`$ define the searched quefrency range, $`c[q] = \lvert \mathcal{F}^{-1}\{\log \lvert X \rvert^2\} \rvert`$ is the real cepstrum, and $`\hat{c}[q]`$ is the linear-regression baseline over the pitch-relevant quefrency interval.
 
 **Gender estimation** (Traunmüller & Eriksson 1995 empirical distributions):
 
@@ -1094,8 +1188,8 @@ Where: $\text{CPP}$ is cepstral peak prominence in dB, $q$ is quefrency in sampl
 
 | Metric | Unit | Description |
 |--------|------|-------------|
-| F1–F4 Formant Frequency | Hz | Median $F_k$ over voiced frames (LPC, $p = 12$) |
-| Spectral Tilt | dB/oct | Power spectrum slope 100 Hz – Nyquist. Typical speech: $-6$ to $-12$ dB/oct |
+| F1–F4 Formant Frequency | Hz | Median $`F_k`$ over voiced frames (LPC, $`p = 12`$) |
+| Spectral Tilt | dB/oct | Power spectrum slope 100 Hz – Nyquist. Typical speech: $`-6`$ to $`-12`$ dB/oct |
 | Cepstral Peak Prominence (CPP) | dB | Higher = clearer periodic voice. Above 5 dB = modal; below 3 dB = breathy |
 | Breathiness Index | 0–1 | CPP-derived. 0 = modal voice; 1 = highly breathy |
 | Creakiness (Vocal Fry) Ratio | % | Fraction of active frames with autocorrelation peak in 20–80 Hz |

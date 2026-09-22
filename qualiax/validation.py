@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .contracts import REPORT_SCHEMA, SCORECARD_SCHEMA
+from .contracts import INSIGHTS_SCHEMA, REPORT_SCHEMA, SCORECARD_SCHEMA
 
 
 @dataclass(frozen=True)
@@ -23,7 +23,23 @@ def validate_report_payload(payload: Any) -> list[ValidationIssue]:
         return [ValidationIssue(path="$", message="Report payload must be a list.")]
     for index, item in enumerate(payload):
         issues.extend(_validate_required(item, REPORT_SCHEMA["items"], path=f"$[{index}]"))
+        insights = item.get("insights") if isinstance(item, dict) else None
+        if isinstance(insights, dict) and insights:
+            # Only full --insights payloads carry "version"; plugin labels added to a plain
+            # report produce a partial section whose fields are still type-checked.
+            issues.extend(
+                validate_insight_payload(
+                    insights,
+                    path=f"$[{index}].insights",
+                    partial="version" not in insights,
+                )
+            )
     return issues
+
+
+def validate_insight_payload(payload: Any, *, path: str = "$", partial: bool = False) -> list[ValidationIssue]:
+    schema = {**INSIGHTS_SCHEMA, "required": []} if partial else INSIGHTS_SCHEMA
+    return _validate_required(payload, schema, path=path)
 
 
 def validate_scorecard_payload(payload: Any) -> list[ValidationIssue]:
@@ -84,6 +100,12 @@ def _validate_required(payload: Any, schema: dict[str, Any], *, path: str) -> li
     if schema_type == "array":
         if not isinstance(payload, list):
             return [ValidationIssue(path=path, message="Expected array.")]
+        min_items = schema.get("minItems")
+        max_items = schema.get("maxItems")
+        if min_items is not None and len(payload) < min_items:
+            issues.append(ValidationIssue(path=path, message=f"Array must contain at least {min_items} item(s)."))
+        if max_items is not None and len(payload) > max_items:
+            issues.append(ValidationIssue(path=path, message=f"Array must contain at most {max_items} item(s)."))
         item_schema = schema.get("items")
         if isinstance(item_schema, dict):
             for index, item in enumerate(payload):

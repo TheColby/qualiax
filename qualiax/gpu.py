@@ -8,6 +8,9 @@ Auto-selects the fastest available backend in priority order:
 
 All accelerated kernels gracefully fall back to CPU numpy/scipy
 if PyTorch is not installed or the requested device is unavailable.
+The torch and numpy paths use identical framing and scaling, so metric values
+do not depend on which backend ran. K-weighting, true-peak oversampling and
+resampling always run on the CPU with scipy (see the notes on each function).
 
 Usage
 -----
@@ -151,10 +154,25 @@ def _eps32() -> float:
     return float(np.finfo(np.float32).eps)
 
 
+def _n_frames(n_samples: int, frame_len: int, hop: int) -> int:
+    """Frame count used by every framed kernel: ``len(range(0, n - frame_len, hop))``.
+
+    The torch and numpy paths must agree on this so that results do not depend on
+    whether torch is installed.
+    """
+    if hop <= 0:
+        return 0
+    return len(range(0, n_samples - frame_len, hop))
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Accelerated STFT
 #
 # Returns: (freqs: NDArray[F], magnitude: NDArray[F, T])
+#
+# Both paths reproduce ``scipy.signal.stft`` defaults exactly (periodic Hann
+# window, ``boundary='zeros'``, ``padded=True`` and magnitude scaled by
+# ``1 / sum(window)``) so every downstream feature is backend-independent.
 # ─────────────────────────────────────────────────────────────────────────────
 
 def stft(
@@ -181,32 +199,36 @@ def stft(
     return _stft_scipy(mono, sr, n_fft, hop_length)
 
 
-def _stft_torch(mono, sr, n_fft, hop_length, window_name):
+def _stft_mag_torch(mono, n_fft, hop_length):
+    """Magnitude STFT on the active torch device, framed and scaled like scipy.
+
+    Returns a device tensor of shape (n_fft // 2 + 1, T).
+    """
     torch = _ctx.torch
-    # Build window on device
-    win_fn = {"hann": torch.hann_window, "hamming": torch.hamming_window}.get(
-        window_name, torch.hann_window
+    x = _ctx.tensor(np.asarray(mono, dtype=np.float32))
+    half = n_fft // 2
+    # scipy.signal.stft: zero-extend n_fft//2 on both sides (boundary='zeros'),
+    # then zero-pad the tail so the last frame is complete (padded=True).
+    padded_len = x.shape[0] + 2 * half
+    tail = (-(padded_len - n_fft) % hop_length) % n_fft
+    x = torch.nn.functional.pad(x, (half, half + tail))
+    win = torch.hann_window(n_fft, periodic=True, device=_ctx.device)
+    stft_out = torch.stft(
+        x,
+        n_fft=n_fft,
+        hop_length=hop_length,
+        win_length=n_fft,
+        window=win,
+        return_complex=True,
+        center=False,
     )
-    win = win_fn(n_fft, device=_ctx.device)
-    x = _ctx.tensor(mono.astype(np.float32))
+    return stft_out.abs() / win.sum()
 
-    # torch.stft → (freq, time, 2) complex output
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", message=".*resized.*", category=UserWarning)
-        stft_out = torch.stft(
-            x,
-            n_fft=n_fft,
-            hop_length=hop_length,
-            win_length=n_fft,
-            window=win,
-            return_complex=True,
-            pad_mode="reflect",
-            center=True,
-        )  # shape: (n_fft//2+1, T)
 
-    mag = stft_out.abs()
-    freqs = torch.fft.rfftfreq(n_fft, d=1.0 / sr).to(_ctx.device)
-    return _ctx.numpy(freqs), _ctx.numpy(mag)
+def _stft_torch(mono, sr, n_fft, hop_length, window_name):
+    mag = _stft_mag_torch(mono, n_fft, hop_length)
+    freqs = np.fft.rfftfreq(n_fft, d=1.0 / sr)
+    return freqs, _ctx.numpy(mag).astype(np.float64)
 
 
 def _stft_scipy(mono, sr, n_fft, hop_length):
@@ -244,15 +266,23 @@ def batch_energy(
     return _batch_energy_numpy(mono, frame_len, hop)
 
 
+def _unfold_frames_torch(x, n_samples, frame_len, hop):
+    """Frame a device tensor exactly like the numpy kernels (no zero padding).
+
+    Zero-padding the tail would create artificial near-silent frames that bias
+    noise-floor and SNR estimates.
+    """
+    n = _n_frames(n_samples, frame_len, hop)
+    if n <= 0:
+        return None
+    return x.unfold(0, frame_len, hop)[:n]
+
+
 def _batch_energy_torch(mono, frame_len, hop):
-    torch = _ctx.torch
     x = _ctx.tensor(mono)
-    # Pad to make sure we get all frames
-    pad = frame_len - (len(mono) - frame_len) % hop if len(mono) > frame_len else 0
-    if pad > 0:
-        x = torch.nn.functional.pad(x, (0, pad))
-    # unfold: (n_frames, frame_len)
-    frames = x.unfold(0, frame_len, hop)
+    frames = _unfold_frames_torch(x, len(mono), frame_len, hop)
+    if frames is None:
+        return np.array([], dtype=np.float32)
     energy = (frames ** 2).mean(dim=1)
     return _ctx.numpy(energy)
 
@@ -290,10 +320,9 @@ def batch_zcr(
 def _batch_zcr_torch(mono, frame_len, hop):
     torch = _ctx.torch
     x = _ctx.tensor(np.sign(mono))
-    pad = frame_len - (len(mono) - frame_len) % hop if len(mono) > frame_len else 0
-    if pad > 0:
-        x = torch.nn.functional.pad(x, (0, pad))
-    frames = x.unfold(0, frame_len, hop)
+    frames = _unfold_frames_torch(x, len(mono), frame_len, hop)
+    if frames is None:
+        return np.array([], dtype=np.float32)
     # ZCR = mean of (|diff| > 0) → (|sign_diff| > 0)
     sign_diff = torch.abs(frames[:, 1:] - frames[:, :-1])
     zcr = (sign_diff > 0).float().mean(dim=1)
@@ -342,11 +371,9 @@ def _batch_autocorr_torch(mono, frame_len, hop, normalize):
     torch = _ctx.torch
     x = _ctx.tensor(mono)
 
-    pad = frame_len - (len(mono) - frame_len) % hop if len(mono) > frame_len else 0
-    if pad > 0:
-        x = torch.nn.functional.pad(x, (0, pad))
-
-    frames = x.unfold(0, frame_len, hop)  # (N, frame_len)
+    frames = _unfold_frames_torch(x, len(mono), frame_len, hop)  # (N, frame_len)
+    if frames is None:
+        return np.zeros((0, frame_len), dtype=np.float32)
     # Remove mean per frame
     frames = frames - frames.mean(dim=1, keepdim=True)
 
@@ -358,7 +385,9 @@ def _batch_autocorr_torch(mono, frame_len, hop, normalize):
     acf = acf_full[:, :frame_len]                 # (N, frame_len) — keep lags
 
     if normalize:
-        norm = acf[:, 0:1].clamp(min=1e-8)
+        # Match the numpy path: only normalise frames with non-negligible energy.
+        lag0 = acf[:, 0:1]
+        norm = torch.where(lag0 > 1e-8, lag0, torch.ones_like(lag0))
         acf = acf / norm
 
     return _ctx.numpy(acf)
@@ -408,44 +437,36 @@ def mfcc(
     return _mfcc_numpy(mono, sr, n_mfcc, n_mels, n_fft, fmin, fmax)
 
 
+def _mel_filterbank(sr, n_mels, n_fft, fmin, fmax) -> NDArray:
+    """Triangular mel filterbank shared by the torch and numpy MFCC paths."""
+    n_freqs = n_fft // 2 + 1
+    mel_min = 2595 * np.log10(1 + fmin / 700)
+    mel_max = 2595 * np.log10(1 + fmax / 700)
+    mel_pts = np.linspace(mel_min, mel_max, n_mels + 2)
+    hz_pts = 700 * (10 ** (mel_pts / 2595) - 1)
+    bin_pts = np.floor(hz_pts * (n_fft + 1) / sr).astype(int)
+    bin_pts = np.clip(bin_pts, 0, n_freqs - 1)
+
+    fb = np.zeros((n_mels, n_freqs))
+    for m in range(1, n_mels + 1):
+        f_lo, f_c, f_hi = bin_pts[m - 1], bin_pts[m], bin_pts[m + 1]
+        for k in range(f_lo, f_c + 1):
+            if f_c > f_lo and 0 <= k < n_freqs:
+                fb[m - 1, k] = (k - f_lo) / (f_c - f_lo)
+        for k in range(f_c, f_hi + 1):
+            if f_hi > f_c and 0 <= k < n_freqs:
+                fb[m - 1, k] = (f_hi - k) / (f_hi - f_c)
+    return fb
+
+
 def _mfcc_torch(mono, sr, n_mfcc, n_mels, n_fft, fmin, fmax):
     torch = _ctx.torch
 
-    # --- STFT ---
-    hop_length = n_fft // 2
-    win = torch.hann_window(n_fft, device=_ctx.device)
-    x = _ctx.tensor(mono.astype(np.float32))
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", message=".*resized.*", category=UserWarning)
-        stft_out = torch.stft(
-            x, n_fft=n_fft, hop_length=hop_length,
-            win_length=n_fft, window=win,
-            return_complex=True, pad_mode="reflect", center=False,
-        )
-    power = stft_out.abs() ** 2  # (n_fft//2+1, T)
+    # --- STFT (scipy-compatible framing and scaling) ---
+    power = _stft_mag_torch(mono, n_fft, n_fft // 2) ** 2  # (n_fft//2+1, T)
 
-    # --- Mel filterbank (computed on device) ---
-    n_freqs = n_fft // 2 + 1
-    mel_min = 2595.0 * math.log10(1.0 + fmin / 700.0)
-    mel_max = 2595.0 * math.log10(1.0 + fmax / 700.0)
-    mel_pts = torch.linspace(mel_min, mel_max, n_mels + 2, device=_ctx.device)
-    hz_pts = 700.0 * (10.0 ** (mel_pts / 2595.0) - 1.0)
-    bin_pts = (hz_pts * (n_fft + 1) / sr).long().clamp(0, n_freqs - 1)
-
-    fb = torch.zeros(n_mels, n_freqs, device=_ctx.device)
-    for m in range(1, n_mels + 1):
-        f_lo, f_c, f_hi = bin_pts[m - 1], bin_pts[m], bin_pts[m + 1]
-        # Rising slope
-        if f_c > f_lo:
-            for k in range(int(f_lo), int(f_c) + 1):
-                if 0 <= k < n_freqs:
-                    fb[m - 1, k] = float(k - f_lo) / float(f_c - f_lo)
-        # Falling slope
-        if f_hi > f_c:
-            for k in range(int(f_c), int(f_hi) + 1):
-                if 0 <= k < n_freqs:
-                    fb[m - 1, k] = float(f_hi - k) / float(f_hi - f_c)
-
+    # --- Mel filterbank ---
+    fb = _ctx.tensor(_mel_filterbank(sr, n_mels, n_fft, fmin, fmax))
     mel_power = torch.mm(fb, power)  # (n_mels, T)
     log_mel = torch.log(mel_power + 1e-8)  # (n_mels, T)
 
@@ -475,24 +496,7 @@ def _mfcc_numpy(mono, sr, n_mfcc, n_mels, n_fft, fmin, fmax):
         _, _, Zxx = scipy_stft(mono, fs=sr, nperseg=n_fft, noverlap=n_fft // 2)
         power = np.abs(Zxx) ** 2
 
-        n_freqs = n_fft // 2 + 1
-        mel_min = 2595 * np.log10(1 + fmin / 700)
-        mel_max = 2595 * np.log10(1 + fmax / 700)
-        mel_pts = np.linspace(mel_min, mel_max, n_mels + 2)
-        hz_pts = 700 * (10 ** (mel_pts / 2595) - 1)
-        bin_pts = np.floor(hz_pts * (n_fft + 1) / sr).astype(int)
-        bin_pts = np.clip(bin_pts, 0, n_freqs - 1)
-
-        fb = np.zeros((n_mels, n_freqs))
-        for m in range(1, n_mels + 1):
-            f_lo, f_c, f_hi = bin_pts[m - 1], bin_pts[m], bin_pts[m + 1]
-            for k in range(f_lo, f_c + 1):
-                if f_c > f_lo and 0 <= k < n_freqs:
-                    fb[m - 1, k] = (k - f_lo) / (f_c - f_lo)
-            for k in range(f_c, f_hi + 1):
-                if f_hi > f_c and 0 <= k < n_freqs:
-                    fb[m - 1, k] = (f_hi - k) / (f_hi - f_c)
-
+        fb = _mel_filterbank(sr, n_mels, n_fft, fmin, fmax)
         mel_power = fb @ power
         log_mel = np.log(mel_power + 1e-8)
         mfccs_out = scipy_dct(log_mel, type=2, axis=0, norm="ortho")[:n_mfcc]
@@ -505,98 +509,61 @@ def _mfcc_numpy(mono, sr, n_mfcc, n_mels, n_fft, fmin, fmax):
 # Accelerated K-weighting filter (BS.1770)
 # ─────────────────────────────────────────────────────────────────────────────
 
-_torchaudio_available: Optional[bool] = None
+# Analog prototype parameters that reproduce the ITU-R BS.1770-4 48 kHz
+# coefficient tables exactly (same derivation as libebur128).
+_KW_SHELF_F0 = 1681.974450955533
+_KW_SHELF_GAIN_DB = 3.999843853973347
+_KW_SHELF_Q = 0.7071752369554196
+_KW_SHELF_VB_EXP = 0.4996667741545416
+_KW_HP_F0 = 38.13547087602444
+_KW_HP_Q = 0.5003270373238773
 
 
-def _check_torchaudio() -> bool:
-    global _torchaudio_available
-    if _torchaudio_available is None:
-        try:
-            import torchaudio.functional  # noqa: F401
-            _torchaudio_available = True
-        except ImportError:
-            _torchaudio_available = False
-    return _torchaudio_available
+def k_weighting_coefficients(sr: int) -> tuple[list[float], list[float], list[float], list[float]]:
+    """Return ``(b1, a1, b2, a2)`` for the two K-weighting biquads at ``sr``.
+
+    At 48 kHz these equal the BS.1770-4 tables. The RLB high-pass numerator is
+    ``[1, -2, 1]`` at 48 kHz (a passband gain slightly above unity that the
+    -0.691 dB constant is calibrated against); that reference gain is kept at
+    every other sample rate.
+    """
+    K = math.tan(math.pi * _KW_SHELF_F0 / sr)
+    Vh = 10 ** (_KW_SHELF_GAIN_DB / 20.0)
+    Vb = Vh ** _KW_SHELF_VB_EXP
+    a0 = 1 + K / _KW_SHELF_Q + K * K
+    b1 = [
+        (Vh + Vb * K / _KW_SHELF_Q + K * K) / a0,
+        2 * (K * K - Vh) / a0,
+        (Vh - Vb * K / _KW_SHELF_Q + K * K) / a0,
+    ]
+    a1 = [1.0, 2 * (K * K - 1) / a0, (1 - K / _KW_SHELF_Q + K * K) / a0]
+
+    K2 = math.tan(math.pi * _KW_HP_F0 / sr)
+    a0_2 = 1 + K2 / _KW_HP_Q + K2 * K2
+    K48 = math.tan(math.pi * _KW_HP_F0 / 48000.0)
+    gain_48k = 1 + K48 / _KW_HP_Q + K48 * K48
+    b2 = [gain_48k / a0_2, -2.0 * gain_48k / a0_2, gain_48k / a0_2]
+    a2 = [1.0, 2 * (K2 * K2 - 1) / a0_2, (1 - K2 / _KW_HP_Q + K2 * K2) / a0_2]
+    return b1, a1, b2, a2
 
 
 def k_weighting_filter(mono: NDArray, sr: int) -> NDArray:
     """
-    Apply BS.1770 K-weighting (two cascaded IIR stages).
-    Uses torchaudio functional biquad on GPU when available.
-    Falls back to scipy.signal.lfilter.
+    Apply BS.1770 K-weighting (two cascaded IIR stages) in float64 on the CPU.
+
+    A torch path is deliberately not used: IIR filtering is sequential, float32
+    biquads are numerically poor for a 38 Hz high-pass, and ``torchaudio``'s
+    ``biquad`` clamps its output to [-1, 1], which under-reads loud material.
     """
-    if _ctx.available() and _check_torchaudio():
-        try:
-            return _k_weight_torch(mono, sr)
-        except Exception as e:
-            warnings.warn(f"[gpu] k-weight torch failed ({e}), falling back")
-
     return _k_weight_scipy(mono, sr)
-
-
-def _k_weight_torch(mono, sr):
-    import torchaudio.functional as AF
-    torch = _ctx.torch
-
-    x = _ctx.tensor(mono.astype(np.float64)).float()
-
-    # Stage 1 coefficients (high-shelf pre-filter) — same as scipy version
-    db  = 3.999843853973347
-    f0  = 1681.9744509555319
-    Q   = 0.7071752369554193
-    K   = math.tan(math.pi * f0 / sr)
-    Vh  = 10 ** (db / 20.0)
-    Vb  = Vh ** 0.4845
-    a0  = 1 + K / Q + K * K
-    b0_1 = (Vh + Vb * K / Q + K * K) / a0
-    b1_1 = 2 * (K * K - Vh) / a0
-    b2_1 = (Vh - Vb * K / Q + K * K) / a0
-    a1_1 = 2 * (K * K - 1) / a0
-    a2_1 = (1 - K / Q + K * K) / a0
-
-    # Stage 2 coefficients (high-pass RLB)
-    f0_2 = 38.13547087602444
-    Q_2  = 0.5003270373238773
-    K2   = math.tan(math.pi * f0_2 / sr)
-    a0_2 = 1 + K2 / Q_2 + K2 * K2
-    b0_2 = 1.0 / a0_2
-    b1_2 = -2.0 / a0_2
-    b2_2 = 1.0 / a0_2
-    a1_2 = 2 * (K2 * K2 - 1) / a0_2
-    a2_2 = (1 - K2 / Q_2 + K2 * K2) / a0_2
-
-    s1 = AF.biquad(x, b0_1, b1_1, b2_1, 1.0, a1_1, a2_1)
-    s2 = AF.biquad(s1, b0_2, b1_2, b2_2, 1.0, a1_2, a2_2)
-    return _ctx.numpy(s2).astype(np.float64)
 
 
 def _k_weight_scipy(mono, sr):
     from scipy.signal import lfilter
 
-    db  = 3.999843853973347
-    f0  = 1681.9744509555319
-    Q   = 0.7071752369554193
-    K   = math.tan(math.pi * f0 / sr)
-    Vh  = 10 ** (db / 20.0)
-    Vb  = Vh ** 0.4845
-    a0  = 1 + K / Q + K * K
-    b0  = (Vh + Vb * K / Q + K * K) / a0
-    b1  = 2 * (K * K - Vh) / a0
-    b2  = (Vh - Vb * K / Q + K * K) / a0
-    a1  = 2 * (K * K - 1) / a0
-    a2  = (1 - K / Q + K * K) / a0
-    s1  = lfilter([b0, b1, b2], [1, a1, a2], mono)
-
-    f0_2 = 38.13547087602444
-    Q_2  = 0.5003270373238773
-    K2   = math.tan(math.pi * f0_2 / sr)
-    a0_2 = 1 + K2 / Q_2 + K2 * K2
-    b0_2 = 1.0 / a0_2
-    b1_2 = -2.0 / a0_2
-    b2_2 = 1.0 / a0_2
-    a1_2 = 2 * (K2 * K2 - 1) / a0_2
-    a2_2 = (1 - K2 / Q_2 + K2 * K2) / a0_2
-    return lfilter([b0_2, b1_2, b2_2], [1, a1_2, a2_2], s1)
+    b1, a1, b2, a2 = k_weighting_coefficients(sr)
+    s1 = lfilter(b1, a1, np.asarray(mono, dtype=np.float64))
+    return lfilter(b2, a2, s1)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -623,91 +590,45 @@ def spectral_features(
 
 
 def _spectral_features_torch(mono, sr, n_fft):
-    torch = _ctx.torch
-    hop = n_fft // 2
-    win = torch.hann_window(n_fft, device=_ctx.device)
-    x = _ctx.tensor(mono.astype(np.float32))
-
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", message=".*resized.*", category=UserWarning)
-        stft_out = torch.stft(
-            x, n_fft=n_fft, hop_length=hop,
-            win_length=n_fft, window=win,
-            return_complex=True, center=True, pad_mode="reflect",
-        )
-    mag = stft_out.abs()       # (F, T)
-    power = mag ** 2            # (F, T)
-    n_freqs = n_fft // 2 + 1
-    freqs = torch.fft.rfftfreq(n_fft, d=1.0 / sr).to(_ctx.device)  # (F,)
-
-    total_power = power.sum(dim=0, keepdim=True).clamp(min=1e-10)  # (1, T)
-    norm_power  = power / total_power                               # (F, T)
-
-    # Centroid
-    centroid_frames = (freqs[:, None] * norm_power).sum(dim=0)  # (T,)
-    centroid = float(centroid_frames.mean())
-
-    # Bandwidth
-    diff_sq = ((freqs[:, None] - centroid_frames[None, :]) ** 2) * norm_power
-    bw_frames = diff_sq.sum(dim=0).clamp(min=0).sqrt()
-    bandwidth = float(bw_frames.mean())
-
-    # Rolloff (95% energy)
-    cumsum = power.cumsum(dim=0)
-    total = power.sum(dim=0, keepdim=True).clamp(min=1e-10)
-    rolloff_mask = (cumsum >= 0.95 * total).float()
-    rolloff_idx = (rolloff_mask.cumsum(dim=0) <= 1).long().sum(dim=0).clamp(0, n_freqs - 1)
-    rolloff = float(freqs[rolloff_idx].float().mean())
-
-    # Spectral flatness
-    log_power = torch.log(power + 1e-10)
-    geo_mean = log_power.mean(dim=0).exp()           # (T,)
-    arith_mean = power.mean(dim=0).clamp(min=1e-10)  # (T,)
-    flatness = float((geo_mean / arith_mean).mean())
-    flatness_db = 10 * math.log10(flatness) if flatness > 0 else -100.0
-
-    # Spectral flux
-    diff_mag = (mag[:, 1:] - mag[:, :-1])
-    flux = float((diff_mag ** 2).sum(dim=0).sqrt().mean())
-
-    # Spectral entropy
-    entropy = float(-(norm_power * torch.log2(norm_power + 1e-10)).sum(dim=0).mean())
-
-    # High-frequency content
-    hfc = float((freqs[:, None] * power).sum(dim=0).mean())
-
-    return {
-        "centroid": centroid,
-        "bandwidth": bandwidth,
-        "rolloff": rolloff,
-        "flatness_db": flatness_db,
-        "flux": flux,
-        "entropy": entropy,
-        "hfc": hfc,
-    }
+    # The FFT work runs on the device; the per-frame reductions are shared with
+    # the numpy path so both backends report identical features.
+    mag = _ctx.numpy(_stft_mag_torch(mono, n_fft, n_fft // 2)).astype(np.float64)
+    freqs = np.fft.rfftfreq(n_fft, d=1.0 / sr)
+    return _spectral_features_from_mag(freqs, mag)
 
 
 def _spectral_features_numpy(mono, sr, n_fft):
     from scipy.signal import stft as scipy_stft
     f, _t, Zxx = scipy_stft(mono, fs=sr, nperseg=n_fft, noverlap=n_fft // 2)
-    mag = np.abs(Zxx)
+    return _spectral_features_from_mag(f, np.abs(Zxx))
+
+
+def _spectral_features_from_mag(freqs: NDArray, mag: NDArray) -> dict[str, float]:
+    """Frame-wise spectral descriptors averaged over time.
+
+    Centroid, bandwidth, rolloff, flatness and entropy are scale-invariant: the
+    flatness floor is relative to the loudest bin (-100 dB), so a quiet tone is
+    exactly as "tonal" as a loud one.
+    """
     power = mag ** 2
     total = power.sum(axis=0, keepdims=True) + 1e-10
     norm = power / total
-    freqs = f
 
-    centroid = float(np.mean((freqs[:, None] * norm).sum(axis=0)))
-    diff_sq = ((freqs[:, None] - centroid) ** 2) * norm
+    centroid_frames = (freqs[:, None] * norm).sum(axis=0)
+    centroid = float(np.mean(centroid_frames))
+    # Bandwidth is the spread around each frame's own centroid.
+    diff_sq = ((freqs[:, None] - centroid_frames[None, :]) ** 2) * norm
     bandwidth = float(np.mean(np.sqrt(diff_sq.sum(axis=0))))
     cumsum = np.cumsum(power, axis=0)
     rolloff_idx = np.argmax(cumsum >= 0.95 * total, axis=0).clip(0, len(freqs) - 1)
     rolloff = float(np.mean(freqs[rolloff_idx]))
-    geo = np.exp(np.mean(np.log(power + 1e-10), axis=0))
-    arith = np.mean(power, axis=0) + 1e-10
+    floor = max(float(np.max(power)) * 1e-10, np.finfo(np.float64).tiny)
+    geo = np.exp(np.mean(np.log(power + floor), axis=0))
+    arith = np.mean(power, axis=0) + floor
     flatness = float(np.mean(geo / arith))
     flatness_db = 10 * math.log10(flatness) if flatness > 0 else -100.0
     diff_mag = np.diff(mag, axis=1)
-    flux = float(np.mean(np.sqrt(np.sum(diff_mag ** 2, axis=0))))
+    flux = float(np.mean(np.sqrt(np.sum(diff_mag ** 2, axis=0)))) if diff_mag.shape[1] else 0.0
     entropy = float(np.mean(-(norm * np.log2(norm + 1e-10)).sum(axis=0)))
     hfc = float(np.mean((freqs[:, None] * power).sum(axis=0)))
 
@@ -728,60 +649,38 @@ def _spectral_features_numpy(mono, sr, n_fft):
 
 def true_peak(mono: NDArray, sr: int, oversample: int = 4) -> float:
     """
-    Compute true peak (dBTP) via oversampling.
-    GPU-accelerated via torch interpolation.
+    Compute true peak (dBTP) via band-limited (polyphase FIR) oversampling.
+
+    Always runs on the CPU: linear interpolation (the previous torch path) can
+    never exceed the sample peak, so it cannot detect inter-sample peaks at all.
     """
-    if _ctx.available():
-        try:
-            return _true_peak_torch(mono, oversample)
-        except Exception as e:
-            warnings.warn(f"[gpu] true_peak torch failed ({e}), falling back")
-
     return _true_peak_scipy(mono, sr, oversample)
-
-
-def _true_peak_torch(mono, oversample):
-    torch = _ctx.torch
-    x = _ctx.tensor(mono.astype(np.float32)).view(1, 1, -1)
-    # Upsample via linear interpolation (faster than resample_poly for this purpose)
-    up = torch.nn.functional.interpolate(
-        x, scale_factor=float(oversample), mode="linear", align_corners=False
-    )
-    peak = float(up.abs().max())
-    return 20 * math.log10(peak) if peak > 0 else -math.inf
 
 
 def _true_peak_scipy(mono, sr, oversample):
     from scipy.signal import resample_poly
+    mono = np.asarray(mono, dtype=np.float64)
+    if mono.size == 0:
+        return -math.inf
     up = resample_poly(mono, oversample, 1)
-    peak = float(np.max(np.abs(up)))
+    # True peak can never be below the sample peak.
+    peak = max(float(np.max(np.abs(up))), float(np.max(np.abs(mono))))
     return 20 * math.log10(peak) if peak > 0 else -math.inf
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Accelerated resampling
+# Resampling
 # ─────────────────────────────────────────────────────────────────────────────
 
 def resample(mono: NDArray, orig_sr: int, target_sr: int) -> NDArray:
-    """Resample audio. GPU-accelerated via torch interpolation when available."""
+    """Resample audio with an anti-aliased polyphase filter (CPU).
+
+    Linear interpolation (the previous torch path) has no anti-aliasing filter,
+    so downsampling folded out-of-band energy into the passband.
+    """
     if orig_sr == target_sr:
         return mono
-    if _ctx.available():
-        try:
-            return _resample_torch(mono, orig_sr, target_sr)
-        except Exception as e:
-            warnings.warn(f"[gpu] resample torch failed ({e}), falling back")
     return _resample_scipy(mono, orig_sr, target_sr)
-
-
-def _resample_torch(mono, orig_sr, target_sr):
-    torch = _ctx.torch
-    x = _ctx.tensor(mono.astype(np.float32)).view(1, 1, -1)
-    n_out = int(len(mono) * target_sr / orig_sr)
-    up = torch.nn.functional.interpolate(
-        x, size=n_out, mode="linear", align_corners=False
-    )
-    return _ctx.numpy(up.squeeze())
 
 
 def _resample_scipy(mono, orig_sr, target_sr):

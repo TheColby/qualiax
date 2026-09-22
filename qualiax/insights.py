@@ -72,19 +72,38 @@ class InsightPayload:
         }
 
 
+# Metric name -> insight feature. Keys must match the names emitted by the
+# metric modules exactly; the short aliases are kept for hand-built reports.
 _FINGERPRINT_FEATURES = {
     "SNR": "noise.snr",
     "Estimated SNR": "noise.snr",
     "Integrated Loudness (LUFS)": "loudness.integrated_lufs",
     "True Peak": "loudness.true_peak",
     "DNSMOS OVRL": "perceptual.dnsmos_ovrl",
+    "DNSMOS P.835 OVRL": "perceptual.dnsmos_ovrl",
+    "DNSMOS P.835 OVRL (proxy)": "perceptual.dnsmos_ovrl",
     "P.563 Proxy (NB Quality Estimate)": "perceptual.p563_proxy",
     "Spectral Centroid": "spectral.centroid",
     "Zero Crossing Rate": "temporal.zcr",
     "Clipping Ratio": "noise.clipping_ratio",
     "Harmonic-to-Noise Ratio": "speech.hnr",
+    "Harmonic-to-Noise Ratio (HNR)": "speech.hnr",
     "F0 Mean": "prosody.f0_mean",
 }
+
+# The metric modules report clipping as a sample count plus a 0/1 full-scale
+# flag rather than a ratio, so the ratio feature is derived from these.
+_NEAR_CLIPPED_METRIC = "Near-Clipped Samples"
+_CLIPPING_FLAG_METRIC = "Clipping Detected"
+_DROPOUT_METRIC = "Detected Dropouts"
+
+KNOWN_INSIGHT_FEATURES = frozenset(_FINGERPRINT_FEATURES.values())
+_VALID_LABEL_SEVERITIES = ("info", "warn", "fail")
+FINGERPRINT_VERSION = 2
+
+
+class InsightInputError(ValueError):
+    """Raised when an insight input (rules, baseline) cannot be used."""
 
 
 def enrich_results(
@@ -102,7 +121,7 @@ def enrich_results(
     insight_rules_path: str | Path | None = None,
 ) -> list[FileResult]:
     """Attach composite insight payloads to file results in place."""
-    baseline = baseline_results or _load_report_results(baseline_path)
+    baseline = baseline_results or _load_baseline_results(baseline_path)
     baseline_profile = _profile(baseline) if baseline else {}
     baseline_meta = _baseline_metadata(baseline_profile, baseline_path, baseline)
     previous_features = _load_drift_state(drift_state_path) if drift else None
@@ -110,8 +129,7 @@ def enrich_results(
     custom_rules = _load_insight_rules(insight_rules_path)
 
     for result in results:
-        features = _extract_features(result.metrics)
-        metric_lookup = _feature_metric_lookup(result.metrics)
+        features, metric_lookup = _result_features(result)
         fingerprint = _quality_fingerprint(
             features,
             sensitivity=fingerprint_sensitivity,
@@ -186,10 +204,27 @@ def enrich_existing_report(
     return results
 
 
+def validate_insight_inputs(
+    *,
+    baseline_path: str | Path | None = None,
+    insight_rules_path: str | Path | None = None,
+) -> None:
+    """Fail fast on unusable --baseline / --insight-rules inputs.
+
+    Raises InsightInputError with a user-facing message; intended to run
+    before any audio is analyzed.
+    """
+    _load_baseline_results(baseline_path)
+    _load_insight_rules(insight_rules_path)
+
+
 def validate_insights_report(path: str | Path) -> list[InsightValidationIssue]:
     """Validate only the insight payload portions of an existing report."""
     issues: list[InsightValidationIssue] = []
-    payload = _load_raw_report_payload(path)
+    try:
+        payload = _load_raw_report_payload(path)
+    except ValueError as exc:
+        return [InsightValidationIssue("$", f"Report is not valid JSON/JSONL: {exc}")]
     if not isinstance(payload, list):
         return [InsightValidationIssue("$", "Report payload must be a list.")]
     for index, item in enumerate(payload):
@@ -227,35 +262,65 @@ def export_flagged_segment_snippets(
     output_dir: str | Path,
     *,
     padding_s: float = 0.25,
+    overwrite: bool = True,
+    session_paths: set[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Export WAV snippets for flagged segment results and link them into insights."""
+    """Export WAV snippets for flagged segment results and link them into insights.
+
+    With ``overwrite=False`` a FileExistsError is raised before anything is
+    written if a snippet path already exists, unless that path is listed in
+    ``session_paths`` (snippets this process wrote earlier, e.g. in watch
+    mode). Paths written by this call are added to ``session_paths``.
+    """
     from .analyzer import AudioLoader
 
     output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    exported: list[dict[str, Any]] = []
-    audio_cache: dict[str, tuple[Any, int]] = {}
-
+    planned: list[tuple[FileResult, str, Path]] = []
+    name_owner: dict[str, str] = {}
     for result in results:
         if result.segment_index is None:
             continue
-        labels = result.insights.get("defect_labels", [])
-        if not labels:
+        if not (result.insights or {}).get("defect_labels"):
             continue
         source = result.source_file or result.path
-        source_path = Path(source)
-        if not source_path.exists():
+        if not Path(source).exists():
             continue
+        name = _snippet_name(result)
+        if name_owner.setdefault(name, source) != source:
+            # Same stem from a different directory; keep both snippets.
+            name = _snippet_name(result, disambiguate=True)
+        planned.append((result, source, output_dir / name))
+
+    if not overwrite:
+        allowed = session_paths or set()
+        existing = [str(path) for _, _, path in planned if path.exists() and str(path) not in allowed]
+        if existing:
+            raise FileExistsError(
+                "Refusing to overwrite existing snippet file(s) without --force: "
+                + ", ".join(existing[:3])
+                + (" ..." if len(existing) > 3 else "")
+            )
+
+    if planned:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    exported: list[dict[str, Any]] = []
+    audio_cache: dict[str, tuple[Any, int]] = {}
+
+    for result, source, snippet_path in planned:
+        labels = result.insights.get("defect_labels", [])
         if source not in audio_cache:
-            audio_cache[source] = AudioLoader.load(source_path)
+            audio_cache[source] = AudioLoader.load(Path(source))
         audio, sr = audio_cache[source]
-        start_s = max(0.0, float(result.segment_start_s or 0.0) - padding_s)
-        end_s = max(start_s, float(result.segment_end_s or start_s) + padding_s)
+        total = audio.shape[-1] if hasattr(audio, "shape") else len(audio)
+        duration = total / sr if sr else 0.0
+        end_s = min(duration, float(result.segment_end_s or result.segment_start_s or 0.0) + padding_s)
+        start_s = min(end_s, max(0.0, float(result.segment_start_s or 0.0) - padding_s))
         start = int(round(start_s * sr))
-        end = min(int(round(end_s * sr)), audio.shape[-1] if hasattr(audio, "shape") else len(audio))
+        end = min(int(round(end_s * sr)), total)
         snippet_audio = audio[start:end] if getattr(audio, "ndim", 1) == 1 else audio[:, start:end]
-        snippet_path = output_dir / _snippet_name(result)
         _write_wav(snippet_path, snippet_audio, sr)
+        if session_paths is not None:
+            session_paths.add(str(snippet_path))
         snippet = {
             "path": str(snippet_path),
             "source_file": source,
@@ -273,17 +338,33 @@ def export_flagged_segment_snippets(
     return exported
 
 
-def _load_report_results(path: str | Path | None) -> list[FileResult]:
+def _load_baseline_results(path: str | Path | None) -> list[FileResult]:
+    if path is None:
+        return []
+    results = _load_report_results(path, role="baseline report")
+    if not _profile(results):
+        raise InsightInputError(
+            f"Baseline report {path} has no metrics insights can compare against; "
+            "pass a qualiax JSON/JSONL report produced with the default metric groups."
+        )
+    return results
+
+
+def _load_report_results(path: str | Path | None, *, role: str = "report") -> list[FileResult]:
     if path is None:
         return []
     path = Path(path)
-    text = path.read_text(encoding="utf-8")
-    if path.suffix.lower() in {".jsonl", ".ndjson"}:
-        payload = [json.loads(line) for line in text.splitlines() if line.strip()]
-    else:
-        payload = json.loads(text)
+    try:
+        payload = _load_raw_report_payload(path)
+    except OSError as exc:
+        raise InsightInputError(f"Cannot read {role} {path}: {exc}") from exc
+    except ValueError as exc:
+        raise InsightInputError(f"{role.capitalize()} {path} is not valid JSON/JSONL: {exc}") from exc
     if not isinstance(payload, list):
-        return []
+        raise InsightInputError(
+            f"{role.capitalize()} {path} must be a qualiax JSON/JSONL report (a list of per-file results), "
+            f"not a JSON {type(payload).__name__}."
+        )
 
     loaded: list[FileResult] = []
     for item in payload:
@@ -337,31 +418,11 @@ def _load_raw_report_payload(path: str | Path) -> Any:
 
 
 def _validate_insight_payload(payload: dict[str, Any], path: str) -> list[InsightValidationIssue]:
-    issues: list[InsightValidationIssue] = []
-    required = {
-        "version": str,
-        "quality_fingerprint": dict,
-        "defect_labels": list,
-        "repair_suggestions": list,
-        "ci_checks": list,
-        "triage": dict,
-    }
-    for key, expected in required.items():
-        if key not in payload:
-            issues.append(InsightValidationIssue(f"{path}.{key}", "Missing required insight field."))
-            continue
-        if not isinstance(payload[key], expected):
-            issues.append(InsightValidationIssue(f"{path}.{key}", f"Expected {expected.__name__}."))
-    if payload.get("version") != INSIGHT_SCHEMA_VERSION:
-        issues.append(InsightValidationIssue(f"{path}.version", f"Expected insight version {INSIGHT_SCHEMA_VERSION}."))
-    for label_index, label in enumerate(payload.get("defect_labels", [])):
-        if not isinstance(label, dict):
-            issues.append(InsightValidationIssue(f"{path}.defect_labels[{label_index}]", "Expected object."))
-            continue
-        for key in ("id", "severity", "confidence", "evidence", "evidence_metrics"):
-            if key not in label:
-                issues.append(InsightValidationIssue(f"{path}.defect_labels[{label_index}].{key}", "Missing required label field."))
-    return issues
+    # Single source of truth: the published INSIGHTS_SCHEMA contract, which
+    # --validate-output applies to full reports as well.
+    from .validation import validate_insight_payload
+
+    return [InsightValidationIssue(issue.path, issue.message) for issue in validate_insight_payload(payload, path=path)]
 
 
 def _load_drift_state(path: str | Path | None) -> dict[str, float] | None:
@@ -391,6 +452,39 @@ def _write_drift_state(path: str | Path, features: dict[str, float]) -> None:
     )
 
 
+def _result_features(result: FileResult) -> tuple[dict[str, float], dict[str, MetricResult]]:
+    """Features and their evidence metrics for one result, including derived ones."""
+    features = _extract_features(result.metrics)
+    lookup = _feature_metric_lookup(result.metrics)
+    if "noise.clipping_ratio" not in features:
+        derived = _derived_clipping_ratio(result)
+        if derived is not None:
+            features["noise.clipping_ratio"], lookup["noise.clipping_ratio"] = derived
+    return features, lookup
+
+
+def _derived_clipping_ratio(result: FileResult) -> tuple[float, MetricResult] | None:
+    """Fraction of samples pinned at full scale, from the noise/basic clipping metrics.
+
+    "Near-Clipped Samples" counts samples within 0.1% of the file's own peak,
+    which also catches the crests of an unclipped loud sine, so only count
+    them when "Clipping Detected" confirms the peak actually reached full scale.
+    """
+    by_name = {metric.name: metric for metric in result.metrics}
+    count_metric = by_name.get(_NEAR_CLIPPED_METRIC)
+    flag_metric = by_name.get(_CLIPPING_FLAG_METRIC)
+    if count_metric is None or flag_metric is None:
+        return None
+    count, flag = count_metric.value, flag_metric.value
+    if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (count, flag)):
+        return None
+    total_samples = float(result.duration_s or 0.0) * float(result.sample_rate or 0)
+    if total_samples <= 0:
+        return None
+    ratio = min(1.0, float(count) / total_samples) if flag else 0.0
+    return round(ratio, 4), count_metric
+
+
 def _extract_features(metrics: Iterable[MetricResult]) -> dict[str, float]:
     features: dict[str, float] = {}
     for metric in metrics:
@@ -414,19 +508,87 @@ def _feature_metric_lookup(metrics: Iterable[MetricResult]) -> dict[str, MetricR
     return lookup
 
 
+def load_insight_rules(path: str | Path) -> dict[str, Any]:
+    """Load and validate a JSON/TOML insight rules file.
+
+    Raises InsightInputError with a readable message for unreadable files,
+    parse errors, and rules that could never fire (unknown feature, no bound).
+    """
+    path = Path(path)
+    suffix = path.suffix.lower()
+    if suffix not in {".json", ".toml"}:
+        raise InsightInputError(f"Insight rules must be a .json or .toml file: {path}")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise InsightInputError(f"Cannot read insight rules {path}: {exc}") from exc
+    try:
+        if suffix == ".json":
+            payload = json.loads(text)
+        else:
+            try:
+                import tomllib
+            except ImportError:  # pragma: no cover - Python < 3.11
+                import tomli as tomllib
+            payload = tomllib.loads(text)
+    except ValueError as exc:  # JSONDecodeError and TOMLDecodeError both subclass ValueError
+        raise InsightInputError(f"Invalid {suffix[1:].upper()} in insight rules {path}: {exc}") from exc
+    problems = _insight_rule_problems(payload)
+    if problems:
+        shown = "; ".join(problems[:5]) + (f"; ... ({len(problems) - 5} more)" if len(problems) > 5 else "")
+        raise InsightInputError(f"Invalid insight rules {path}: {shown}")
+    return payload
+
+
 def _load_insight_rules(path: str | Path | None) -> dict[str, Any]:
     if path is None:
         return {}
-    path = Path(path)
-    if path.suffix.lower() == ".json":
-        return json.loads(path.read_text(encoding="utf-8"))
-    if path.suffix.lower() == ".toml":
-        try:
-            import tomllib
-        except ImportError:  # pragma: no cover - Python < 3.11
-            import tomli as tomllib
-        return tomllib.loads(path.read_text(encoding="utf-8"))
-    raise ValueError("Insight rules must be JSON or TOML.")
+    return load_insight_rules(path)
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
+
+
+def _insight_rule_problems(payload: Any) -> list[str]:
+    if not isinstance(payload, dict):
+        return [f"expected an object/table with a 'labels' list, got {type(payload).__name__}"]
+    problems = []
+    unknown = sorted(set(payload) - {"labels", "version"})
+    if unknown:
+        problems.append(f"unknown top-level key(s) {', '.join(unknown)} (supported: labels)")
+    labels = payload.get("labels", [])
+    if not isinstance(labels, list):
+        return problems + ["'labels' must be a list of rule objects"]
+    for index, rule in enumerate(labels):
+        where = f"labels[{index}]"
+        if not isinstance(rule, dict):
+            problems.append(f"{where} must be an object")
+            continue
+        feature = rule.get("feature")
+        if feature not in KNOWN_INSIGHT_FEATURES:
+            problems.append(
+                f"{where}.feature {feature!r} is not a known insight feature "
+                f"(valid: {', '.join(sorted(KNOWN_INSIGHT_FEATURES))})"
+            )
+        bounds = {key: rule[key] for key in ("min", "max") if key in rule}
+        if not bounds:
+            problems.append(f"{where} needs a numeric 'min' and/or 'max'")
+        for key, value in bounds.items():
+            if not _is_number(value):
+                problems.append(f"{where}.{key} must be a number")
+        if len(bounds) == 2 and all(_is_number(v) for v in bounds.values()) and bounds["min"] > bounds["max"]:
+            problems.append(f"{where} has min > max, so it would fire on every value")
+        if "severity" in rule and rule["severity"] not in _VALID_LABEL_SEVERITIES:
+            problems.append(f"{where}.severity must be one of {', '.join(_VALID_LABEL_SEVERITIES)}")
+        if "confidence" in rule and not (_is_number(rule["confidence"]) and 0.0 <= rule["confidence"] <= 1.0):
+            problems.append(f"{where}.confidence must be a number between 0 and 1")
+        for key in ("id", "message", "suggestion"):
+            if key in rule and not isinstance(rule[key], str):
+                problems.append(f"{where}.{key} must be a string")
+        if "ci_fail" in rule and not isinstance(rule["ci_fail"], bool):
+            problems.append(f"{where}.ci_fail must be true or false")
+    return problems
 
 
 def _apply_custom_rules(
@@ -490,7 +652,7 @@ def _quality_fingerprint(
         separators=(",", ":"),
     )
     return {
-        "version": 1,
+        "version": FINGERPRINT_VERSION,
         "sensitivity": sensitivity,
         "weights": weights,
         "signature": hashlib.sha1(signature_source.encode("utf-8")).hexdigest()[:16],
@@ -533,7 +695,9 @@ def _defect_labels(
     true_peak = features.get("loudness.true_peak")
     loudness = features.get("loudness.integrated_lufs")
     clipping = features.get("noise.clipping_ratio")
-    mos = features.get("perceptual.dnsmos_ovrl") or features.get("perceptual.p563_proxy")
+    mos_feature = "perceptual.dnsmos_ovrl" if "perceptual.dnsmos_ovrl" in features else "perceptual.p563_proxy"
+    mos = features.get(mos_feature)
+    is_silence = result.content_type == "silence" or result.duration_s == 0
 
     if snr is not None and snr < thresholds["snr_min"]:
         severity = "fail" if snr < thresholds["snr_fail"] else "warn"
@@ -546,10 +710,14 @@ def _defect_labels(
         labels.append(_label("under_loud", "warn", 0.78, f"integrated loudness is {loudness:.1f} LUFS", metric_lookup.get("loudness.integrated_lufs")))
     if loudness is not None and loudness > thresholds["lufs_max"]:
         labels.append(_label("over_loud", "warn", 0.78, f"integrated loudness is {loudness:.1f} LUFS", metric_lookup.get("loudness.integrated_lufs")))
-    if mos is not None and mos < 2.8:
-        metric = metric_lookup.get("perceptual.dnsmos_ovrl") or metric_lookup.get("perceptual.p563_proxy")
-        labels.append(_label("low_perceptual_quality", "warn", 0.82, f"MOS proxy/model score is {mos:.2f}", metric))
-    if result.content_type == "silence" or result.duration_s == 0:
+    # MOS models/proxies score silence as "bad speech"; silence_heavy covers that case.
+    if mos is not None and mos < 2.8 and not is_silence:
+        labels.append(_label("low_perceptual_quality", "warn", 0.82, f"MOS proxy/model score is {mos:.2f}", metric_lookup.get(mos_feature)))
+    dropout_metric = next((m for m in result.metrics if m.name == _DROPOUT_METRIC), None)
+    dropouts = dropout_metric.value if dropout_metric is not None else None
+    if isinstance(dropouts, (int, float)) and dropouts > 0:
+        labels.append(_label("dropouts", "warn", 0.85, f"{int(dropouts)} dropout(s) to digital silence detected", dropout_metric))
+    if is_silence:
         labels.append(_label("silence_heavy", "warn", 0.88, "content detector or duration indicates little usable audio", None))
     return labels
 
@@ -602,6 +770,7 @@ def _repair_suggestions(labels: list[dict[str, Any]]) -> list[str]:
         "over_loud": "Reduce program loudness and check limiter settings.",
         "low_perceptual_quality": "Inspect codec, noise, and speech enhancement stages before accepting the file.",
         "silence_heavy": "Trim leading/trailing silence or verify the file is the intended recording.",
+        "dropouts": "Check the capture/transmission chain for buffer underruns or packet loss; re-record or conceal the gaps.",
     }
     suggestions = []
     for label in labels:
@@ -643,7 +812,7 @@ def _mos_explanation(metrics: Iterable[MetricResult]) -> list[dict[str, Any]]:
 def _profile(results: list[FileResult]) -> dict[str, dict[str, float]]:
     values: dict[str, list[float]] = defaultdict(list)
     for result in results:
-        for name, value in _extract_features(result.metrics).items():
+        for name, value in _result_features(result)[0].items():
             values[name].append(value)
     return {
         name: {
@@ -814,10 +983,12 @@ def _attach_dataset_audit(results: list[FileResult]) -> None:
         signature = result.insights.get("quality_fingerprint", {}).get("signature")
         if signature:
             signatures[signature].append(result)
+    # Segments of one recording routinely share a fingerprint; only a match
+    # against a different source recording counts as a duplicate.
     duplicate_paths = {
         result.path
         for grouped in signatures.values()
-        if len(grouped) > 1
+        if len({item.source_file or item.path for item in grouped}) > 1
         for result in grouped
     }
     for result in results:
@@ -908,9 +1079,11 @@ def _attach_triage(results: list[FileResult]) -> None:
         }
 
 
-def _snippet_name(result: FileResult) -> str:
-    source = Path(result.source_file or result.path).stem
-    safe_source = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in source)
+def _snippet_name(result: FileResult, *, disambiguate: bool = False) -> str:
+    source = result.source_file or result.path
+    safe_source = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in Path(source).stem)
+    if disambiguate:
+        safe_source += "-" + hashlib.sha1(str(source).encode("utf-8")).hexdigest()[:8]
     return f"{safe_source}-segment-{result.segment_index or 0}.wav"
 
 
@@ -924,7 +1097,8 @@ def _write_wav(path: Path, audio: Any, sr: int) -> None:
     if data.ndim == 2:
         channels = int(data.shape[0])
         data = data.T.reshape(-1)
-    pcm = np.clip(data * 32767.0, -32768, 32767).astype("<i2")
+    # Same 2**15 scale AudioLoader uses, so 16-bit sources round-trip exactly.
+    pcm = np.clip(np.round(data * 32768.0), -32768, 32767).astype("<i2")
     with wave.open(str(path), "wb") as wf:
         wf.setnchannels(channels)
         wf.setsampwidth(2)

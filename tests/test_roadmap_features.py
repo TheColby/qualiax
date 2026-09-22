@@ -150,8 +150,9 @@ def test_migration_and_release_readiness(tmp_path):
         supported_python=("3.9", "3.10", "3.11", "3.12"),
     )
 
-    assert migrated[0]["schema_version"]
+    assert migrated[0]["schema_version"] == qualiax.OUTPUT_SCHEMA_VERSION
     assert migrated[0]["diagnostics"] == []
+    assert qualiax.validate_report_payload(migrated) == []
     assert ExitCode.QUALITY_GATE_FAILED == 2
     assert readiness["ready"] is True
     assert readiness["support_matrix"]["python"] == ["3.9", "3.10", "3.11", "3.12"]
@@ -168,4 +169,4 @@ def test_asset_locks_reproducibility_and_public_api(tmp_path):
     asset.write_bytes(b"changed model")
     assert verify_asset_lock(lock)["valid"] is False
     assert qualiax.audit_dataset is audit_dataset
-    assert qualiax.__version__ == "1.0.0"
+    assert qualiax.__version__ == "1.1.0"

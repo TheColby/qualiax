@@ -5,7 +5,7 @@ dist/
 build/
 .eggs/
 *.egg
-.venv/
+.venv*/
 venv/
 .env
 .claude/
@@ -20,6 +20,7 @@ uv.lock
 results.json
 *.auto.json
 out/
+demo_out/
 outputs/
 artifacts/
 qualiax-artifacts/
