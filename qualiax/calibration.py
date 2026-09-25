@@ -28,16 +28,19 @@ def cases_from_results(
     labels are the ``id`` values of ``result.insights["defect_labels"]``.
     """
     cases: list[CalibrationCase] = []
+    expected_labels: dict[str, set[str]] = {}
     for result in results:
         key = result.path if result.path in expected else result.source_file
         if key is None or key not in expected:
             continue
+        if key not in expected_labels:
+            expected_labels[key] = {str(label) for label in expected[key]}
         predicted = {
             str(label.get("id"))
             for label in result.insights.get("defect_labels", [])
             if isinstance(label, dict) and label.get("id") is not None
         }
-        cases.append(CalibrationCase(result.path, {str(label) for label in expected[key]}, predicted))
+        cases.append(CalibrationCase(result.path, set(expected_labels[key]), predicted))
     return cases
 
 

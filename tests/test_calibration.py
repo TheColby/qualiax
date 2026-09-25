@@ -93,6 +93,25 @@ def test_cases_from_results_pairs_ground_truth_and_skips_unannotated():
     assert report["labels"]["noisy_floor"]["false_positive"] == 0
 
 
+def test_cases_from_results_reuses_generator_annotations_for_segments():
+    segments = [
+        FileResult(
+            path=f"call.wav segment {index}",
+            source_file="call.wav",
+            insights={"defect_labels": [{"id": "noisy_floor"}]},
+        )
+        for index in range(2)
+    ]
+    cases = cases_from_results(segments, {"call.wav": iter(["noisy_floor"])})
+
+    assert [case.expected_labels for case in cases] == [{"noisy_floor"}, {"noisy_floor"}]
+    report = calibrate_labels(cases)
+    assert report["labels"]["noisy_floor"]["false_positive"] == 0
+    assert report["labels"]["noisy_floor"]["support"] == 2
+    cases[0].expected_labels.clear()
+    assert cases[1].expected_labels == {"noisy_floor"}
+
+
 def test_confidence_interval_widens_with_confidence_level():
     values = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     widths = [hi - lo for lo, hi in (confidence_interval(values, level) for level in (0.5, 0.8, 0.9, 0.95, 0.99))]
